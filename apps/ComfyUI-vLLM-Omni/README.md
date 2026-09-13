@@ -13,7 +13,6 @@ It can send model inference requests to either a locally running vLLM-Omni servi
 > [!TIP]
 > If you run both ComfyUI and vLLM-Omni on the same device, you can create separate virtual environments and use different Python versions for them.
 
-
 ## Installation
 
 Copy this folder to the `custom_nodes` subfolder of your ComfyUI installation. Your directory should look like `ComfyUI/custom_nodes/ComfyUI-vLLM-Omni`.
@@ -21,9 +20,10 @@ Copy this folder to the `custom_nodes` subfolder of your ComfyUI installation. Y
 If you are running ComfyUI during copying, you should restart ComfyUI to load this extension.
 
 > [!TIP]
-> You can use utility websites such as https://download-directory.github.io/ to download a subdirectory of a repo. Also checkout community discussions (e.g., https://stackoverflow.com/questions/7106012/download-a-single-folder-or-directory-from-a-github-repository) for more info.
+> You can use utility websites such as <https://download-directory.github.io/> to download a subdirectory of a repo. Also checkout community discussions (e.g., <https://stackoverflow.com/questions/7106012/download-a-single-folder-or-directory-from-a-github-repository>) for more info.
 
 On the device and virtual environment you run ComfyUI, launch ComfyUI with
+
 ```bash
 cd ComfyUI
 
@@ -35,6 +35,7 @@ python main.py --cpu
 ```
 
 On the device and virtual environment you run vLLM-Omni, start a model service with
+
 ```bash
 vllm serve The_Model_ID_to_Serve --omni --port 8000
 ```
@@ -123,6 +124,18 @@ You can configure per-stage sampling parameters for multi-stage models.
 >
 > Do not use `frame` and `references` together. Task routing is automatic from which inputs you connect.
 
+For MiniMax-H3 Ref2VA, **Video References** accepts up to 9 images (`image_1`–`image_9`),
+3 videos (`video_1`–`video_3`), and 3 audio clips (`audio_1`–`audio_3`), with at most
+12 connected inputs in total. Any mixture containing at least one image or video
+is supported; empty and audio-only references are rejected. For example, you can
+combine 6 images, 3 videos, and 3 audio clips in one request.
+
+Within each media type, references follow slot-number order, skipping unconnected
+slots. For example, connecting `image_2` and `image_9` sends `image_2` as the first
+image and `image_9` as the second. Each image slot uses the first image in its batch.
+Existing connections to `image_1`, `image_2`, `audio_1`, `audio_2`, `video_1`, and
+`video_2` remain valid in saved workflows.
+
 ### TTS (e.g., Qwen TTS series)
 
 (Also available at **ComfyUI sidebar->Template->vLLM-Omni->vLLM-Omni TTS**)
@@ -178,11 +191,11 @@ Whenever you find an issue or problem, please
 
 Features
 
-- https://github.com/dougbtv/comfyui-vllm-omni/ The official reference implementation for ComfyUI integration with vLLM-Omni's DALL-E compatible image generation API.
-- https://github.com/Comfy-Org/ComfyUI/tree/master/comfy_extras ComfyUI's built-in node implementations.
+- <https://github.com/dougbtv/comfyui-vllm-omni/> The official reference implementation for ComfyUI integration with vLLM-Omni's DALL-E compatible image generation API.
+- <https://github.com/Comfy-Org/ComfyUI/tree/master/comfy_extras> ComfyUI's built-in node implementations.
 
 UI/UX design references
 
-- https://github.com/sgl-project/sglang/pull/15271 SGLang Diffusion's official ComfyUI integration for image and video generation.
-- https://github.com/SXQBW/ComfyUI-Qwen-Omni A third party ComfyUI integration for Qwen Omni series.
-- https://github.com/flybirdxx/ComfyUI-Qwen-TTS https://github.com/DarioFT/ComfyUI-Qwen3-TTS Third  party ComfyUI integrations for Qwen TTS series.
+- <https://github.com/sgl-project/sglang/pull/15271> SGLang Diffusion's official ComfyUI integration for image and video generation.
+- <https://github.com/SXQBW/ComfyUI-Qwen-Omni> A third party ComfyUI integration for Qwen Omni series.
+- <https://github.com/flybirdxx/ComfyUI-Qwen-TTS> <https://github.com/DarioFT/ComfyUI-Qwen3-TTS> Third  party ComfyUI integrations for Qwen TTS series.

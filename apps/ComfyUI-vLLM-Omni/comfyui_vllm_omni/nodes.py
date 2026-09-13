@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 from typing import Literal
 
 import torch
@@ -790,6 +793,10 @@ class VLLMOmniVideoReferences:
                 "audio_2": ("AUDIO",),
                 "video_1": ("VIDEO",),
                 "video_2": ("VIDEO",),
+                # Append ports to preserve connections in saved workflows.
+                **{f"image_{i}": ("IMAGE",) for i in range(3, 10)},
+                "audio_3": ("AUDIO",),
+                "video_3": ("VIDEO",),
             },
         }
 
@@ -806,21 +813,26 @@ class VLLMOmniVideoReferences:
         audio_2: AudioInput | None = None,
         video_1: VideoInput | None = None,
         video_2: VideoInput | None = None,
+        image_3: torch.Tensor | None = None,
+        image_4: torch.Tensor | None = None,
+        image_5: torch.Tensor | None = None,
+        image_6: torch.Tensor | None = None,
+        image_7: torch.Tensor | None = None,
+        image_8: torch.Tensor | None = None,
+        image_9: torch.Tensor | None = None,
+        audio_3: AudioInput | None = None,
+        video_3: VideoInput | None = None,
         **kwargs,
     ):
         if kwargs:
             logger.info("Uncaught kwargs: %s", kwargs)
         refs = VideoReferences()
-        if image_1 is not None:
-            refs["image_1"] = image_1
-        if image_2 is not None:
-            refs["image_2"] = image_2
-        if audio_1 is not None:
-            refs["audio_1"] = audio_1
-        if audio_2 is not None:
-            refs["audio_2"] = audio_2
-        if video_1 is not None:
-            refs["video_1"] = video_1
-        if video_2 is not None:
-            refs["video_2"] = video_2
+        for kind, values in (
+            ("image", (image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8, image_9)),
+            ("video", (video_1, video_2, video_3)),
+            ("audio", (audio_1, audio_2, audio_3)),
+        ):
+            for index, value in enumerate(values, start=1):
+                if value is not None:
+                    refs[f"{kind}_{index}"] = value
         return (refs,)
