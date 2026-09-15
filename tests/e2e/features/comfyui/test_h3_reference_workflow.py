@@ -88,9 +88,12 @@ def test_reference_workflow_defaults_and_portable_assets(workflow):
     assert values[0] == "http://localhost:8000/v1"
     assert values[1] == "MiniMaxAI/MiniMax-H3"
     assert "<Picture 1>" in values[2]
-    assert values[4:8] == [1344, 768, 24, 124]
-    assert (values[7] - 5) % 17 == 0
-    assert 4 <= values[7] / values[6] <= 15
+    assert values[4:8] == [1344, 768, 24, 5.167]
+    num_frames = round(values[7] * values[6])
+    assert num_frames == 124
+    assert values[3] == ""
+    assert (num_frames - 5) % 17 == 0
+    assert 4 <= values[7] <= 15
     assert by_type["VLLMOmniDiffusionSampling"]["widgets_values"] == [1, 50, 1.0, 1.0, False, False, 42, "fixed"]
     assert by_type["VLLMOmniMiniMaxH3Params"]["widgets_values"] == [3.0, 12.0]
     assert by_type["VLLMOmniRemoteLoRA"]["widgets_values"][0] == ""

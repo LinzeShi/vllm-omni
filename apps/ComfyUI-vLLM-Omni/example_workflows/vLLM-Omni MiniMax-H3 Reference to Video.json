@@ -580,11 +580,11 @@
           "link": null
         },
         {
-          "localized_name": "num_frames",
-          "name": "num_frames",
-          "type": "INT",
+          "localized_name": "duration",
+          "name": "duration",
+          "type": "FLOAT",
           "widget": {
-            "name": "num_frames"
+            "name": "duration"
           },
           "link": null
         }
@@ -610,7 +610,7 @@
         1344,
         768,
         24,
-        124
+        5.167
       ],
       "title": "MiniMax-H3 Reference to Video"
     },
