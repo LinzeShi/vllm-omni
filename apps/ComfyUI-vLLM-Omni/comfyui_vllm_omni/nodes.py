@@ -10,6 +10,9 @@ from .utils.api_client import VLLMOmniClient
 from .utils.logger import get_logger
 from .utils.models import lookup_model_spec
 from .utils.types import (
+    MAX_REFERENCE_AUDIOS,
+    MAX_REFERENCE_IMAGES,
+    MAX_REFERENCE_VIDEOS,
     AudioFormat,
     AutoregressionSamplingParams,
     DiffusionSamplingParams,
@@ -919,9 +922,9 @@ class VLLMOmniVideoReferences:
                 "video_1": ("VIDEO",),
                 "video_2": ("VIDEO",),
                 # Append ports to preserve connections in saved workflows.
-                **{f"image_{i}": ("IMAGE",) for i in range(3, 10)},
-                "audio_3": ("AUDIO",),
-                "video_3": ("VIDEO",),
+                **{f"image_{i}": ("IMAGE",) for i in range(3, MAX_REFERENCE_IMAGES + 1)},
+                **{f"audio_{i}": ("AUDIO",) for i in range(3, MAX_REFERENCE_AUDIOS + 1)},
+                **{f"video_{i}": ("VIDEO",) for i in range(3, MAX_REFERENCE_VIDEOS + 1)},
             },
         }
 

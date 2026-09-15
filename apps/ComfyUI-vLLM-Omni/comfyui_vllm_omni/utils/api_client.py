@@ -32,7 +32,13 @@ from .format import (
 )
 from .logger import get_logger, pretty_printer
 from .models import lookup_model_spec
-from .types import AudioFormat
+from .types import (
+    MAX_REFERENCE_AUDIOS,
+    MAX_REFERENCE_IMAGES,
+    MAX_REFERENCE_VIDEOS,
+    MAX_TOTAL_REFERENCES,
+    AudioFormat,
+)
 
 logger = get_logger(__name__)
 
@@ -312,9 +318,9 @@ class VLLMOmniClient:
             video_task = "fl2va"
         elif references is not None:
             reference_formats = (
-                ("image", 9, "png", "image/png", image_tensor_to_png_bytes),
-                ("video", 3, "mp4", "video/mp4", video_to_bytes),
-                ("audio", 3, "mp3", "audio/mpeg", audio_to_bytes),
+                ("image", MAX_REFERENCE_IMAGES, "png", "image/png", image_tensor_to_png_bytes),
+                ("video", MAX_REFERENCE_VIDEOS, "mp4", "video/mp4", video_to_bytes),
+                ("audio", MAX_REFERENCE_AUDIOS, "mp3", "audio/mpeg", audio_to_bytes),
             )
             supported_inputs = {f"{kind}_{i}" for kind, limit, *_ in reference_formats for i in range(1, limit + 1)}
             connected = {name: value for name, value in references.items() if value is not None}
@@ -325,9 +331,11 @@ class VLLMOmniClient:
                 raise ValueError(
                     "references requires at least one image or video; audio-only inputs are not supported."
                 )
-            if len(connected) > 12:
+            if len(connected) > MAX_TOTAL_REFERENCES:
                 raise ValueError(
-                    "references supports at most 12 inputs in total (up to 9 images, 3 videos, and 3 audios)."
+                    f"references supports at most {MAX_TOTAL_REFERENCES} inputs in total "
+                    f"(up to {MAX_REFERENCE_IMAGES} images, {MAX_REFERENCE_VIDEOS} videos, "
+                    f"and {MAX_REFERENCE_AUDIOS} audios)."
                 )
             for kind, limit, extension, content_type, encode in reference_formats:
                 for index in range(1, limit + 1):
