@@ -150,7 +150,7 @@ def test_forward_cuda_still_requires_an_implementation():
 
 def test_mot_rmsnorm_dispatches_on_xpu_without_an_override(mock_platform):
     """MoTRMSNorm relies on the inherited fallback (regression test)."""
-    from vllm_omni.diffusion.layers.mot.mot_layernorm import MoTRMSNorm
+    from vllm_omni.diffusion.models.bagel.mot.mot_layernorm import MoTRMSNorm
 
     assert "forward_xpu" not in MoTRMSNorm.__dict__
 
