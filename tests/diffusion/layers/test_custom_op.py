@@ -32,6 +32,20 @@ def mock_platform(monkeypatch):
     return select
 
 
+@pytest.mark.skipif(
+    any(
+        getattr(custom_op.current_omni_platform, f"is_{backend}")()
+        for backend in ("rocm", "cuda", "npu", "xpu", "musa")
+    ),
+    reason="Requires the native platform dispatch path",
+)
+def test_native_platform_dispatch_without_mocks():
+    op = _NativeOnlyOp()
+    x = torch.randn(4, 8)
+
+    assert torch.equal(op(x), x * 2)
+
+
 @pytest.mark.parametrize(
     ("backend", "method"),
     [
