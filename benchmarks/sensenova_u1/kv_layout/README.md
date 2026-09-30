@@ -6,6 +6,18 @@ output-directory checks and PyTorch accelerator APIs in place of CUDA-specific
 synchronization/memory helpers. On CUDA those helpers use the same allocator.
 The published numbers come from the original H200 runs, not a new run of this packaging.
 
+## Get the reproduction files
+
+These experiment files are archived in the author's fork, outside the PR's merge diff.
+Clone the evidence branch and fetch the measured baseline before following the commands below:
+
+```bash
+git clone --single-branch --branch evidence/sensenova-a6 \
+  https://github.com/LinzeShi/vllm-omni.git sensenova-a6-evidence
+cd sensenova-a6-evidence
+git fetch https://github.com/vllm-project/vllm-omni.git 0173cb374839c437df098e5a34b2f842769fb266
+```
+
 ## Inspect the reported samples
 
 From the repository root (no model, GPU or extra Python packages required):
@@ -32,7 +44,7 @@ batch size 1, concurrency 1, think disabled and no TeaCache/Cache-DiT.
 KV caching remains enabled. The prompt and all sampling settings are in
 `run_benchmark.py`. Do not change these between variants.
 
-Prepare two clean source trees and the exact model snapshot. Run from the PR checkout:
+Prepare two clean source trees and the exact model snapshot. Run from the evidence checkout:
 
 ```bash
 BENCH="$(realpath benchmarks/sensenova_u1/kv_layout)"
