@@ -1,0 +1,202 @@
+{
+  "provenance": {
+    "base": "0173cb374839c437df098e5a34b2f842769fb266",
+    "candidate_source_sha256": {
+      "vllm_omni/diffusion/models/sensenova_u1/fused_rmsnorm_rope.py": "880c022693324b9cbd142adb2c904c521af9c1b6f3e0fe8bc570243749e5acf0",
+      "vllm_omni/diffusion/models/sensenova_u1/paged_decode.py": "b5654d1f38bc9547e84e52d2f3ee8e94ba1cfd285adca27e5958707799624831",
+      "vllm_omni/diffusion/models/sensenova_u1/sensenova_u1_transformer.py": "53aa1e03891d3d31e839eac298ca765a72552542f63a8985c7b12e09d980d65c"
+    },
+    "model": "sensenova/SenseNova-U1.5-8B-MoT",
+    "model_revision": "9feeeab8a2792514d109cd34589342a2cc1d4ab2",
+    "gpu": "H200 SXM",
+    "batch_size": 1,
+    "concurrency": 1,
+    "environment": {
+      "torch": "2.13.0",
+      "vllm": "0.30.0",
+      "vllm-omni": "0.0.0.dev0",
+      "transformers": "5.14.1",
+      "diffusers": "0.40.0"
+    }
+  },
+  "variants": {
+    "base": {
+      "requests": [
+        {
+          "round": "benchmark",
+          "iteration": 1,
+          "e2e_ms": 3714.0121441334486,
+          "denoise_ms": 3636.677009984851,
+          "peak_allocated_bytes": 35862062592,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark",
+          "iteration": 2,
+          "e2e_ms": 3685.8339346945286,
+          "denoise_ms": 3603.657675907016,
+          "peak_allocated_bytes": 35862062592,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark",
+          "iteration": 3,
+          "e2e_ms": 3703.477645292878,
+          "denoise_ms": 3625.627925619483,
+          "peak_allocated_bytes": 35862062592,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark",
+          "iteration": 4,
+          "e2e_ms": 3706.9508843123913,
+          "denoise_ms": 3634.203277528286,
+          "peak_allocated_bytes": 35862062592,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark",
+          "iteration": 5,
+          "e2e_ms": 3719.407804310322,
+          "denoise_ms": 3640.1827950030565,
+          "peak_allocated_bytes": 35862062592,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 1,
+          "e2e_ms": 3787.049975246191,
+          "denoise_ms": 3673.6562065780163,
+          "peak_allocated_bytes": 35862062592,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 2,
+          "e2e_ms": 3728.568848222494,
+          "denoise_ms": 3642.262050881982,
+          "peak_allocated_bytes": 35862062592,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 3,
+          "e2e_ms": 3711.409717798233,
+          "denoise_ms": 3630.961000919342,
+          "peak_allocated_bytes": 35862062592,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 4,
+          "e2e_ms": 3775.3930408507586,
+          "denoise_ms": 3682.8718576580286,
+          "peak_allocated_bytes": 35862062592,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 5,
+          "e2e_ms": 3725.350644439459,
+          "denoise_ms": 3627.274574711919,
+          "peak_allocated_bytes": 35862062592,
+          "temporary_peak_bytes": 182982144
+        }
+      ],
+      "trace_counts": {
+        "aten::copy_": 23454,
+        "aten::_local_scalar_dense": 700,
+        "cudaStreamSynchronize": 853
+      }
+    },
+    "candidate": {
+      "requests": [
+        {
+          "round": "benchmark",
+          "iteration": 1,
+          "e2e_ms": 3615.5365891754627,
+          "denoise_ms": 3522.5836746394634,
+          "peak_allocated_bytes": 35813721600,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark",
+          "iteration": 2,
+          "e2e_ms": 3598.627120256424,
+          "denoise_ms": 3522.0663510262966,
+          "peak_allocated_bytes": 35813721600,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark",
+          "iteration": 3,
+          "e2e_ms": 3603.299105539918,
+          "denoise_ms": 3528.5019241273403,
+          "peak_allocated_bytes": 35813721600,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark",
+          "iteration": 4,
+          "e2e_ms": 3599.308703094721,
+          "denoise_ms": 3525.939976796508,
+          "peak_allocated_bytes": 35813721600,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark",
+          "iteration": 5,
+          "e2e_ms": 3618.582332506776,
+          "denoise_ms": 3535.412112250924,
+          "peak_allocated_bytes": 35813721600,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 1,
+          "e2e_ms": 3601.073080673814,
+          "denoise_ms": 3522.7073915302753,
+          "peak_allocated_bytes": 35813721600,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 2,
+          "e2e_ms": 3607.660908252001,
+          "denoise_ms": 3522.90441095829,
+          "peak_allocated_bytes": 35813721600,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 3,
+          "e2e_ms": 3600.3228817135096,
+          "denoise_ms": 3526.4085307717323,
+          "peak_allocated_bytes": 35813721600,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 4,
+          "e2e_ms": 3604.576112702489,
+          "denoise_ms": 3527.648251503706,
+          "peak_allocated_bytes": 35813721600,
+          "temporary_peak_bytes": 182982144
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 5,
+          "e2e_ms": 3610.5640698224306,
+          "denoise_ms": 3526.460152119398,
+          "peak_allocated_bytes": 35813721600,
+          "temporary_peak_bytes": 182982144
+        }
+      ],
+      "trace_counts": {
+        "aten::copy_": 2454,
+        "aten::_local_scalar_dense": 700,
+        "cudaStreamSynchronize": 853
+      }
+    }
+  }
+}
