@@ -52,6 +52,11 @@ matters is whether the next chunk arrives before the viewer finishes the last on
 - **Workload**: built-in image-conditioned rollout with a generated camera script, or a JSON spec with per-chunk actions and mid-rollout prompt updates
 - **Key metrics**: TTFC (time to first chunk), steady-state chunk inter-arrival percentiles, VIDEO_RTF (wall seconds per video second; lower is better), chunk-deadline attainment, and simulated playback underruns
 
+### [SenseNova-U1 denoise synchronization](sensenova_u1/denoise_sync/README.md)
+
+Offline full-model A/B measurements with worker-side profiling, recorded samples,
+and commands to reproduce the denoise-sync comparison.
+
 ### [Distributed](distributed/omni_connectors/README.md) — RDMA Connector Testing
 
 RDMA environment setup and transfer tests for `MooncakeTransferEngineConnector`, including pytest-based single-node checks and manual cross-node benchmarks.

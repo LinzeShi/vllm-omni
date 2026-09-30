@@ -1,0 +1,182 @@
+{
+  "provenance": {
+    "base": "62ebad2d7cd79da24653110d8043cc13fb744328",
+    "candidate_source_sha256": {
+      "vllm_omni/diffusion/models/sensenova_u1/pipeline_sensenova_u1.py": "e50b6d342e71cad7a8c5101222bc1820ba2939d915679b2dca8fee19d5d69ca2",
+      "vllm_omni/diffusion/models/sensenova_u1/sensenova_u1_transformer.py": "afa9239363f45f2eed8722c4edf3509d96c2acc5b7bb64e9d679721d74268133",
+      "vllm_omni/diffusion/cache/teacache/extractors.py": "fe3ee8b80128221d88839f46afa14f1f0f5e4515bcd8bc6ec3002ba229145a0e"
+    },
+    "model": "sensenova/SenseNova-U1.5-8B-MoT",
+    "model_revision": "9feeeab8a2792514d109cd34589342a2cc1d4ab2",
+    "gpu": "H200 SXM",
+    "batch_size": 1,
+    "concurrency": 1,
+    "environment": {
+      "torch": "2.13.0",
+      "vllm": "0.30.0",
+      "vllm-omni": "0.0.0.dev0",
+      "transformers": "5.14.1",
+      "diffusers": "0.40.0"
+    }
+  },
+  "variants": {
+    "base": {
+      "requests": [
+        {
+          "round": "benchmark",
+          "iteration": 1,
+          "e2e_ms": 3626.2939861044288,
+          "denoise_ms": 3572.4395881406963,
+          "peak_allocated_bytes": 35862062592
+        },
+        {
+          "round": "benchmark",
+          "iteration": 2,
+          "e2e_ms": 3638.8378590345383,
+          "denoise_ms": 3584.866762161255,
+          "peak_allocated_bytes": 35862062592
+        },
+        {
+          "round": "benchmark",
+          "iteration": 3,
+          "e2e_ms": 3651.5324781648815,
+          "denoise_ms": 3585.1027350872755,
+          "peak_allocated_bytes": 35862062592
+        },
+        {
+          "round": "benchmark",
+          "iteration": 4,
+          "e2e_ms": 3641.754006035626,
+          "denoise_ms": 3589.246977120638,
+          "peak_allocated_bytes": 35862062592
+        },
+        {
+          "round": "benchmark",
+          "iteration": 5,
+          "e2e_ms": 3652.792604174465,
+          "denoise_ms": 3600.305952131748,
+          "peak_allocated_bytes": 35862062592
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 1,
+          "e2e_ms": 3713.869309052825,
+          "denoise_ms": 3659.4256218522787,
+          "peak_allocated_bytes": 35862062592
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 2,
+          "e2e_ms": 3694.3208747543395,
+          "denoise_ms": 3629.5009553432465,
+          "peak_allocated_bytes": 35862062592
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 3,
+          "e2e_ms": 3672.435310203582,
+          "denoise_ms": 3624.1950569674373,
+          "peak_allocated_bytes": 35862062592
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 4,
+          "e2e_ms": 3637.3854922130704,
+          "denoise_ms": 3588.701928034425,
+          "peak_allocated_bytes": 35862062592
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 5,
+          "e2e_ms": 3685.9439709223807,
+          "denoise_ms": 3634.7590629011393,
+          "peak_allocated_bytes": 35862062592
+        }
+      ],
+      "trace_counts": {
+        "aten::copy_": 23454,
+        "aten::_local_scalar_dense": 700,
+        "cudaStreamSynchronize": 853
+      }
+    },
+    "candidate": {
+      "requests": [
+        {
+          "round": "benchmark",
+          "iteration": 1,
+          "e2e_ms": 3616.474282927811,
+          "denoise_ms": 3552.0709264092147,
+          "peak_allocated_bytes": 35862126592
+        },
+        {
+          "round": "benchmark",
+          "iteration": 2,
+          "e2e_ms": 3641.1107112653553,
+          "denoise_ms": 3571.1549161933362,
+          "peak_allocated_bytes": 35862126592
+        },
+        {
+          "round": "benchmark",
+          "iteration": 3,
+          "e2e_ms": 3623.661282006651,
+          "denoise_ms": 3550.2339331433177,
+          "peak_allocated_bytes": 35862126592
+        },
+        {
+          "round": "benchmark",
+          "iteration": 4,
+          "e2e_ms": 3683.095640037209,
+          "denoise_ms": 3607.331808190793,
+          "peak_allocated_bytes": 35862126592
+        },
+        {
+          "round": "benchmark",
+          "iteration": 5,
+          "e2e_ms": 3644.4287979975343,
+          "denoise_ms": 3571.498348377645,
+          "peak_allocated_bytes": 35862126592
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 1,
+          "e2e_ms": 3690.5331779271364,
+          "denoise_ms": 3625.5834377370775,
+          "peak_allocated_bytes": 35862126592
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 2,
+          "e2e_ms": 3627.1567000076175,
+          "denoise_ms": 3563.536339905113,
+          "peak_allocated_bytes": 35862126592
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 3,
+          "e2e_ms": 3641.636334825307,
+          "denoise_ms": 3592.849893029779,
+          "peak_allocated_bytes": 35862126592
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 4,
+          "e2e_ms": 3651.4086476527154,
+          "denoise_ms": 3581.4951192587614,
+          "peak_allocated_bytes": 35862126592
+        },
+        {
+          "round": "benchmark-round2",
+          "iteration": 5,
+          "e2e_ms": 3687.9701651632786,
+          "denoise_ms": 3621.453502215445,
+          "peak_allocated_bytes": 35862126592
+        }
+      ],
+      "trace_counts": {
+        "aten::copy_": 23162,
+        "aten::_local_scalar_dense": 3,
+        "cudaStreamSynchronize": 60
+      }
+    }
+  }
+}
