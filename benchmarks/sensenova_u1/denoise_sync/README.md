@@ -6,6 +6,18 @@ output-directory checks and PyTorch accelerator APIs in place of CUDA-specific
 synchronization/memory helpers. On CUDA those helpers use the same allocator.
 The published numbers come from the original H200 runs, not a new run of this packaging.
 
+## Get the reproduction files
+
+These experiment files are archived in the author's fork, outside the PR's merge diff.
+Clone the evidence branch and fetch the measured baseline before following the commands below:
+
+```bash
+git clone --single-branch --branch evidence/sensenova-a9 \
+  https://github.com/LinzeShi/vllm-omni.git sensenova-a9-evidence
+cd sensenova-a9-evidence
+git fetch https://github.com/vllm-project/vllm-omni.git 62ebad2d7cd79da24653110d8043cc13fb744328
+```
+
 ## Inspect the reported samples
 
 From the repository root (no model, GPU or extra Python packages required):
@@ -25,14 +37,14 @@ They are evidence from one machine, not expected results for every GPU.
 Use a vLLM-Omni development environment with vLLM 0.30.0, PyTorch 2.13.0,
 CUDA 13.0, Transformers 5.14.1 and Diffusers 0.40.0. The original GPU was one
 H200 SXM. Install the repository requirements before running this benchmark.
-The complete model requires substantially more memory than the attention microbenchmark.
+The full-model benchmark requires enough GPU memory for the checkpoint and generation workload.
 
 Both variants use BF16, TP=1, 1024x1024, 50 steps, CFG=4, seed=42,
 batch size 1, concurrency 1, think disabled and no TeaCache/Cache-DiT.
 KV caching remains enabled. The prompt and all sampling settings are in
 `run_benchmark.py`. Do not change these between variants.
 
-Prepare two clean source trees and the exact model snapshot. Run from the PR checkout:
+Prepare two clean source trees and the exact model snapshot. Run from the evidence checkout:
 
 ```bash
 BENCH="$(realpath benchmarks/sensenova_u1/denoise_sync)"
