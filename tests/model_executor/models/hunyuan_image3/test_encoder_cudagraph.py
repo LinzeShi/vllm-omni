@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
+from contextlib import contextmanager
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -87,7 +89,7 @@ def test_sdpa_encoder_stays_eager():
     assert HunyuanImage3ForConditionalGeneration.create_encoder_cudagraph_manager(model, None, None, None) is None
 
 
-def _cpu_manager(budgets, *, image_base_size=1024, factor=16):
+def _cpu_manager(budgets, *, image_base_size=1024, factor=16, tp_size=1):
     from vllm.config.multimodal import MultiModalConfig
 
     from vllm_omni.model_executor.models.hunyuan_image3.encoder_cudagraph import HunyuanImage3EncoderCudaGraphManager
@@ -98,8 +100,12 @@ def _cpu_manager(budgets, *, image_base_size=1024, factor=16):
             encoder_cudagraph_max_vision_items_per_batch=2,
             encoder_cudagraph_max_frames_per_batch=None,
         ),
-        model_config=SimpleNamespace(multimodal_config=MultiModalConfig(limit_per_prompt={"image": 4, "video": 0})),
-        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        model_config=SimpleNamespace(
+            multimodal_config=MultiModalConfig(
+                limit_per_prompt={"image": 4, "video": 0}, mm_encoder_tp_mode="data" if tp_size > 1 else "weights"
+            )
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=tp_size),
     )
     model = SimpleNamespace(
         config=SimpleNamespace(image_base_size=image_base_size, hidden_size=2, vit_processor={"max_num_patches": 1024}),
@@ -135,6 +141,98 @@ def test_capture_skips_unusable_budget_resolution_pairs(monkeypatch, budgets, ex
     assert len(captured) == manager.get_num_graphs_to_capture()
 
 
+@pytest.mark.cpu
+@pytest.mark.parametrize("encoder_name", ["vision", "vae"])
+@pytest.mark.parametrize("num_images", [1, 3])
+@pytest.mark.parametrize("rank", [0, 1])
+def test_data_mode_shards_and_gathers_in_input_order(monkeypatch, encoder_name, num_images, rank):
+    from vllm.v1.worker import encoder_cudagraph as upstream
+
+    wrapper = _cpu_manager([1024, 2048, 4096, 8192], tp_size=2)
+    manager = getattr(wrapper, encoder_name)
+    assert manager.use_dp
+    ids = torch.arange(1, num_images + 1, dtype=torch.float32)
+    if encoder_name == "vision":
+        inputs = {
+            "pixels": ids[:, None, None].expand(-1, 1024, 3),
+            "mask": torch.ones(num_images, 1024, dtype=torch.bool),
+            "shapes": torch.tensor([[32, 32]] * num_images),
+        }
+        tokens = 1024
+    else:
+        inputs = {"pixels": ids[:, None, None, None].expand(-1, 3, 1024, 1024)}
+        tokens = 4096
+    expected = [torch.full((tokens, 2), float(i)) for i in range(1, num_images + 1)]
+    assignments = [list(range(r, num_images, 2)) for r in range(2)]
+    capacity = max(map(len, assignments)) * tokens
+    gathered = torch.zeros(2 * capacity, 2)
+    for r, indices in enumerate(assignments):
+        if indices:
+            values = torch.cat([expected[i] for i in indices])
+            gathered[r * capacity : r * capacity + len(values)] = values
+    local_ids = []
+
+    def graph_output(kwargs, budget, path="default", axis_keys=()):
+        selected = kwargs["pixels"].reshape(len(kwargs["pixels"]), -1)[:, 0].tolist()
+        local_ids.extend(selected)
+        return torch.cat([expected[int(i) - 1] for i in selected])
+
+    def all_gather(local, dim):
+        assert dim == 0
+        live_tokens = len(assignments[rank]) * tokens
+        torch.testing.assert_close(local[:live_tokens], gathered[rank * capacity : rank * capacity + live_tokens])
+        assert local.shape == (capacity, 2)
+        return gathered
+
+    monkeypatch.setattr(upstream, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(upstream, "get_tensor_model_parallel_rank", lambda: rank)
+    gather = Mock(side_effect=all_gather)
+    monkeypatch.setattr(upstream, "tensor_model_parallel_all_gather", gather)
+    monkeypatch.setattr(manager, "_run_budget_graph", graph_output)
+    # Keep the actual upstream execute/shard/gather and greedy packing paths.
+    actual = manager.execute(inputs)
+    assert local_ids == [float(i + 1) for i in assignments[rank]]
+    gather.assert_called_once()
+    assert len(actual) == num_images
+    for value, reference in zip(actual, expected):
+        torch.testing.assert_close(value, reference)
+
+
+@pytest.mark.cpu
+def test_vision_shape_fallback_preserves_model_data_parallel_path():
+    from vllm_omni.model_executor.models.hunyuan_image3.encoder_cudagraph import HunyuanImage3EncoderCudaGraphManager
+    from vllm_omni.model_executor.models.hunyuan_image3.hunyuan_image3 import HunyuanImage3ForConditionalGeneration
+
+    pixels = torch.ones(1, 2, 3)  # Not the four-patch capture shape.
+    mask = torch.ones(1, 2, dtype=torch.bool)
+    shapes = torch.tensor([[1, 2]])
+    embeddings = torch.ones(1, 2, 4)
+    model = SimpleNamespace(
+        use_data_parallel=True,
+        _parse_and_validate_image_input=lambda **kwargs: {
+            "pixel_values": {
+                "vit_pixel_values": pixels,
+                "vit_pixel_attention_mask": mask,
+                "vit_spatial_shapes": shapes,
+                "vae_pixel_values": [],
+            }
+        },
+        _vit_encode_dp=Mock(return_value=embeddings),
+        vision_aligner=lambda x: x,
+        _combine_image_embeddings=Mock(return_value=[embeddings[0]]),
+    )
+    model._vit_encode = lambda *args: HunyuanImage3ForConditionalGeneration._vit_encode(model, *args)
+    manager = object.__new__(HunyuanImage3EncoderCudaGraphManager)
+    manager.model = model
+    manager.vision = SimpleNamespace(model=SimpleNamespace(min_tokens=4), graph_misses=0, execute=Mock())
+    manager.vae = SimpleNamespace(model=SimpleNamespace(factor=16))
+    actual = manager.execute({})
+    model._vit_encode_dp.assert_called_once_with(pixels, mask, shapes)
+    manager.vision.execute.assert_not_called()
+    assert manager.vision.graph_misses == 1
+    torch.testing.assert_close(actual[0], embeddings[0])
+
+
 class _LanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
@@ -144,11 +242,9 @@ class _LanguageModel(nn.Module):
         return self.embedding(input_ids)
 
 
-@pytest.fixture(params=[torch.float16, torch.bfloat16])
-def cuda_model(tmp_path, monkeypatch, request):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA required")
-    from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+@contextmanager
+def _cuda_encoder_model(tmp_path, dtype, *, rank=0, world_size=1):
+    from vllm.config import CompilationConfig, ParallelConfig, VllmConfig, set_current_vllm_config
     from vllm.config.multimodal import MultiModalConfig
     from vllm.distributed import (
         destroy_distributed_environment,
@@ -167,21 +263,22 @@ def cuda_model(tmp_path, monkeypatch, request):
     from vllm_omni.model_executor.models.hunyuan_image3.siglip2 import Siglip2VisionTransformer
 
     torch.manual_seed(42)
-    dtype = request.param
     from vllm_omni.platforms import current_omni_platform
 
-    current_omni_platform.set_device(0)
-    init_distributed_environment(
-        world_size=1, rank=0, distributed_init_method=f"file://{tmp_path / 'dist'}", local_rank=0
-    )
-    initialize_model_parallel(tensor_model_parallel_size=1)
+    current_omni_platform.set_device(rank)
     config = VllmConfig()
     config.compilation_config = CompilationConfig(
         cudagraph_mm_encoder=True,
         encoder_cudagraph_token_budgets=[256, 512],
         encoder_cudagraph_max_vision_items_per_batch=2,
     )
-    config.model_config = SimpleNamespace(multimodal_config=MultiModalConfig(limit_per_prompt={"image": 4, "video": 0}))
+    config.parallel_config = ParallelConfig(tensor_parallel_size=world_size)
+    config.model_config = SimpleNamespace(
+        is_moe=False,
+        multimodal_config=MultiModalConfig(
+            limit_per_prompt={"image": 4, "video": 0}, mm_encoder_tp_mode="data" if world_size > 1 else "weights"
+        ),
+    )
     config.scheduler_config = SimpleNamespace(max_num_batched_tokens=512)
     vit_config = dict(
         hidden_size=288,
@@ -196,6 +293,14 @@ def cuda_model(tmp_path, monkeypatch, request):
     )
     try:
         with set_current_vllm_config(config), set_default_torch_dtype(dtype):
+            init_distributed_environment(
+                world_size=world_size,
+                rank=rank,
+                distributed_init_method=f"file://{tmp_path / 'dist'}",
+                local_rank=rank,
+                timeout=timedelta(seconds=120),
+            )
+            initialize_model_parallel(tensor_model_parallel_size=world_size)
             model = object.__new__(HunyuanImage3ForConditionalGeneration)
             nn.Module.__init__(model)
             model.config = SimpleNamespace(
@@ -205,7 +310,7 @@ def cuda_model(tmp_path, monkeypatch, request):
                 vae_downsample_factor=[2, 2],
                 vit_processor={"max_num_patches": 4},
             )
-            model.use_data_parallel = False
+            model.use_data_parallel = world_size > 1
             model.vision_model = Siglip2VisionTransformer(vit_config)
             model.vision_aligner = nn.Linear(288, 32)
             model.vae = AutoencoderKLConv3D(
@@ -240,16 +345,26 @@ def cuda_model(tmp_path, monkeypatch, request):
             runner.compilation_config = config.compilation_config
             runner.supports_mm_inputs = True
             runner.vllm_config, runner.device, runner.dtype = config, torch.device("cuda"), dtype
-            monkeypatch.setattr(runner, "get_model", lambda: model)
+            runner.get_model = lambda: model
             manager = runner._create_encoder_cudagraph_manager()
             # Keep the fixture small while capturing a few real VAE resolutions.
             manager.vae.model.resolutions = ((32, 32), (16, 64), (64, 64))
             manager.vae._capture_axes = (manager.vae.model.resolutions,)
-            yield model, manager
-            manager.clear()
+            try:
+                yield model, manager
+            finally:
+                manager.clear()
     finally:
         destroy_model_parallel()
         destroy_distributed_environment()
+
+
+@pytest.fixture(params=[torch.float16, torch.bfloat16])
+def cuda_model(tmp_path, request):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    with _cuda_encoder_model(tmp_path, request.param) as model_and_manager:
+        yield model_and_manager
 
 
 def _inputs(sizes, seed=42, dtype=torch.float16):
@@ -371,3 +486,53 @@ def test_unusable_capture_budgets_fall_back_to_eager(cuda_model, capture_vision)
     assert manager.vae.graph_hits == 0
     assert manager.vae.graph_misses == 2
     assert (manager.vision.graph_hits > 0) == capture_vision
+
+
+@torch.inference_mode()
+def _data_parallel_worker(rank, tmp_path, dtype):
+    from vllm.distributed import graph_capture
+
+    with _cuda_encoder_model(tmp_path, dtype, rank=rank, world_size=2) as (model, manager):
+        assert manager.vision.use_dp and manager.vae.use_dp
+        with graph_capture(device=torch.device("cuda", rank)):
+            manager.capture(torch.cuda.graph_pool_handle())
+        # One image leaves a rank empty. Three images exercise uneven sharding,
+        # VAE resolution regrouping and reconstruction of the original order.
+        cases = [
+            ([(32, 32)], False, 42),
+            ([(32, 32), (16, 64), (32, 32)], False, 42),
+            ([(32, 32), (16, 64), (32, 32)], False, None),
+            ([(64, 64)], False, 42),  # Known resolution, above every budget.
+            ([(32, 32)], True, 42),
+        ]
+        for index, (sizes, shape_fallback, seed) in enumerate(cases):
+            # Every rank must receive the same inputs and sampling RNG state.
+            torch.manual_seed(100 + index)
+            inputs = _inputs(sizes, seed=seed, dtype=dtype)
+            if shape_fallback:
+                inputs["vit_pixel_values"] = inputs["vit_pixel_values"][:, :2]
+                inputs["vit_pixel_attention_mask"] = inputs["vit_pixel_attention_mask"][:, :2]
+                inputs["vit_spatial_shapes"] = torch.tensor([[1, 2]], device="cuda")
+            state = torch.cuda.get_rng_state()
+            expected = _run_stage(model, None, inputs)
+            after_eager = torch.cuda.get_rng_state()
+            torch.cuda.set_rng_state(state)
+            actual = _run_stage(model, manager, inputs)
+            assert torch.equal(after_eager, torch.cuda.get_rng_state())
+            assert len(actual) == len(expected)
+            for result, reference in zip(actual, expected):
+                patches = inputs["vit_pixel_values"].shape[1]
+                torch.testing.assert_close(result[:-patches], reference[:-patches], rtol=0, atol=0)
+                tolerance = 2 * torch.finfo(dtype).eps
+                torch.testing.assert_close(result[-patches:], reference[-patches:], rtol=tolerance, atol=tolerance)
+        assert manager.vision.graph_misses == 1  # Shape fallback on both ranks.
+        if rank == 0:
+            assert manager.vision.graph_hits > 0 and manager.vae.graph_hits > 0
+
+
+@hardware_test(res={"cuda": "L4"}, num_cards=2)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_data_mode_two_ranks_match_eager(tmp_path, dtype):
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("Two CUDA devices required")
+    torch.multiprocessing.spawn(_data_parallel_worker, args=(tmp_path, dtype), nprocs=2)
