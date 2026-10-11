@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
+import itertools
 from collections import defaultdict
 from typing import Any
 
@@ -38,6 +39,9 @@ class _Encoder(SupportsEncoderCudaGraph):
     def get_encoder_cudagraph_budget_range(self, vllm_config):
         return self.min_tokens, max(self.min_tokens, vllm_config.scheduler_config.max_num_batched_tokens)
 
+    def get_capture_tokens_per_item(self, axis_keys):
+        return self.min_tokens
+
     def select_encoder_cudagraph_items(self, mm_kwargs, indices):
         return {key: value[indices] for key, value in mm_kwargs.items()}
 
@@ -64,7 +68,7 @@ class _VisionEncoder(_Encoder):
     ):
         model = self.model.vision_model
         patches = self.min_tokens
-        batch = min(max_batch_size, max(1, token_budget // patches))
+        batch = min(max_batch_size, token_budget // patches)
         capacity = batch * patches
         return EncoderCudaGraphCaptureInputs(
             values={
@@ -131,6 +135,10 @@ class _VAEEncoder(_Encoder):
             capture_axes=(self.resolutions,),
         )
 
+    def get_capture_tokens_per_item(self, axis_keys):
+        height, width = axis_keys[0]
+        return height * width // self.factor**2
+
     def get_encoder_cudagraph_item_specs(self, mm_kwargs):
         pixels = mm_kwargs["pixels"]
         tokens = pixels.shape[-2] * pixels.shape[-1] // self.factor**2
@@ -145,8 +153,8 @@ class _VAEEncoder(_Encoder):
         self, token_budget, max_batch_size, max_frames_per_batch, device, dtype, path="default", axis_keys=None
     ):
         height, width = axis_keys[0]
-        tokens = height * width // self.factor**2
-        batch = min(max_batch_size, max(1, token_budget // tokens))
+        tokens = self.get_capture_tokens_per_item(axis_keys)
+        batch = min(max_batch_size, token_budget // tokens)
         return EncoderCudaGraphCaptureInputs(
             values={"pixels": torch.zeros(batch, 3, height, width, device=device, dtype=self.model.vae.dtype)}
         )
@@ -163,13 +171,29 @@ class _VAEEncoder(_Encoder):
         return self.encoder_cudagraph_forward({"pixels": mm_kwargs["pixels"].to(self.model.vae.dtype)})
 
 
+class _BudgetedEncoderCudaGraphManager(EncoderCudaGraphManager):
+    """Skip capture when a budget cannot fit one item at the selected resolution."""
+
+    def _capture_budget_graph(self, token_budget, path="default", axis_keys=()):
+        if token_budget < self.model.get_capture_tokens_per_item(axis_keys):
+            return
+        super()._capture_budget_graph(token_budget, path=path, axis_keys=axis_keys)
+
+    def _num_graphs_for_budgets(self, budgets):
+        return sum(
+            budget >= self.model.get_capture_tokens_per_item(axis_keys)
+            for budget in budgets
+            for axis_keys in itertools.product(*self._capture_axes)
+        )
+
+
 class HunyuanImage3EncoderCudaGraphManager:
     """Use upstream capture/replay independently for the two encoder layouts."""
 
     def __init__(self, vllm_config, device, dtype, model):
         self.model = model
-        self.vision = EncoderCudaGraphManager(vllm_config, device, dtype, _VisionEncoder(model))
-        self.vae = EncoderCudaGraphManager(vllm_config, device, dtype, _VAEEncoder(model))
+        self.vision = _BudgetedEncoderCudaGraphManager(vllm_config, device, dtype, _VisionEncoder(model))
+        self.vae = _BudgetedEncoderCudaGraphManager(vllm_config, device, dtype, _VAEEncoder(model))
         self.token_budgets = sorted(set(self.vision.token_budgets + self.vae.token_budgets))
 
     def supports_modality(self, modality):

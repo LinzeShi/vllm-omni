@@ -87,6 +87,54 @@ def test_sdpa_encoder_stays_eager():
     assert HunyuanImage3ForConditionalGeneration.create_encoder_cudagraph_manager(model, None, None, None) is None
 
 
+def _cpu_manager(budgets, *, image_base_size=1024, factor=16):
+    from vllm.config.multimodal import MultiModalConfig
+
+    from vllm_omni.model_executor.models.hunyuan_image3.encoder_cudagraph import HunyuanImage3EncoderCudaGraphManager
+
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            encoder_cudagraph_token_budgets=budgets,
+            encoder_cudagraph_max_vision_items_per_batch=2,
+            encoder_cudagraph_max_frames_per_batch=None,
+        ),
+        model_config=SimpleNamespace(multimodal_config=MultiModalConfig(limit_per_prompt={"image": 4, "video": 0})),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+    )
+    model = SimpleNamespace(
+        config=SimpleNamespace(image_base_size=image_base_size, hidden_size=2, vit_processor={"max_num_patches": 1024}),
+        vae=SimpleNamespace(ffactor_spatial=factor, dtype=torch.float32, config=SimpleNamespace(latent_channels=1)),
+    )
+    return HunyuanImage3EncoderCudaGraphManager(config, torch.device("cpu"), torch.float32, model)
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize(
+    "budgets, expected_vision, expected_vae",
+    [([1024, 2048, 4096, 8192], 4, 74), ([1024, 3500, 4096], 3, 49), ([256, 512], 0, 0)],
+)
+def test_capture_skips_unusable_budget_resolution_pairs(monkeypatch, budgets, expected_vision, expected_vae):
+    from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+
+    manager = _cpu_manager(budgets)
+    captured = []
+
+    def record_capture(encoder, budget, path="default", axis_keys=()):
+        captured.append((encoder, budget, axis_keys))
+
+    # Exercise the real capture traversal, intercepting only the GPU operation.
+    monkeypatch.setattr(EncoderCudaGraphManager, "_capture_budget_graph", record_capture)
+    assert manager.get_num_graphs_to_capture() == expected_vision + expected_vae
+    manager.capture(object())
+    vision = [(b, axes) for enc, b, axes in captured if enc is manager.vision]
+    vae = [(b, axes) for enc, b, axes in captured if enc is manager.vae]
+    assert len(vision) == expected_vision
+    assert len(vae) == expected_vae
+    assert all(b >= 1024 for b, _ in vision)
+    assert all(b >= h * w // 16**2 for b, ((h, w),) in vae)
+    assert len(captured) == manager.get_num_graphs_to_capture()
+
+
 class _LanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
@@ -266,6 +314,10 @@ def test_stage_graph_replay_matches_eager_and_preserves_rng(cuda_model):
     with graph_capture(device=torch.device("cuda")):
         manager.capture(torch.cuda.graph_pool_handle())
     assert torch.equal(state, torch.cuda.get_rng_state()), "capture must not sample VAE latents"
+    assert manager.get_num_graphs_to_capture() == 6
+    assert set(manager.vae.budget_graphs["default"]) == {
+        (budget, (resolution,)) for budget in (256, 512) for resolution in ((32, 32), (16, 64))
+    }
     cases = [
         ([(32, 32)], 42),
         ([(32, 32), (32, 32)], 42),
@@ -292,3 +344,30 @@ def test_stage_graph_replay_matches_eager_and_preserves_rng(cuda_model):
             torch.testing.assert_close(actual[-patches:], expected[-patches:], rtol=tolerance, atol=tolerance)
     assert manager.vision.graph_hits > 0 and manager.vae.graph_hits > 0
     assert manager.vae.graph_misses == 2
+
+
+@hardware_test(res={"cuda": "L4"}, num_cards=1)
+@pytest.mark.parametrize("capture_vision", [True, False])
+@torch.inference_mode()
+def test_unusable_capture_budgets_fall_back_to_eager(cuda_model, capture_vision):
+    from vllm.distributed import graph_capture
+
+    model, manager = cuda_model
+    manager.vae.token_budgets = [128]
+    manager.vae.path_token_budgets = {"default": [128]}
+    if not capture_vision:
+        manager.vision.token_budgets = [2]
+        manager.vision.path_token_budgets = {"default": [2]}
+    assert manager.vae.get_num_graphs_to_capture() == 0
+    with graph_capture(device=torch.device("cuda")):
+        manager.capture(torch.cuda.graph_pool_handle())
+    assert manager.is_captured()
+    assert not manager.vae.budget_graphs
+    inputs = _inputs([(32, 32), (16, 64)], dtype=model.vae.dtype)
+    expected = _run_stage(model, None, inputs)
+    actual = _run_stage(model, manager, inputs)
+    for result, reference in zip(actual, expected):
+        torch.testing.assert_close(result, reference, rtol=0, atol=0)
+    assert manager.vae.graph_hits == 0
+    assert manager.vae.graph_misses == 2
+    assert (manager.vision.graph_hits > 0) == capture_vision
