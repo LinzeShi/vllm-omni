@@ -498,6 +498,7 @@ def _run_stage(model, manager, inputs):
     return outputs
 
 
+@pytest.mark.nvidia_only
 @hardware_test(res={"cuda": "L4"}, num_cards=1)
 @torch.inference_mode()
 def test_stage_graph_replay_matches_eager_and_preserves_rng(cuda_model):
@@ -538,6 +539,7 @@ def test_stage_graph_replay_matches_eager_and_preserves_rng(cuda_model):
     assert manager.vae.graph_misses == 2
 
 
+@pytest.mark.nvidia_only
 @hardware_test(res={"cuda": "L4"}, num_cards=1)
 @pytest.mark.parametrize("capture_vision", [True, False])
 @torch.inference_mode()
@@ -607,6 +609,7 @@ def _data_parallel_worker(rank, tmp_path, dtype):
             assert manager.vision.graph_hits > 0 and manager.vae.graph_hits > 0
 
 
+@pytest.mark.nvidia_only
 @hardware_test(res={"cuda": "L4"}, num_cards=2)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_data_mode_two_ranks_match_eager(tmp_path, dtype):
