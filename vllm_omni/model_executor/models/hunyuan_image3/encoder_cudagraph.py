@@ -172,18 +172,29 @@ class _VAEEncoder(_Encoder):
 
 
 class _BudgetedEncoderCudaGraphManager(EncoderCudaGraphManager):
-    """Skip capture when a budget cannot fit one item at the selected resolution."""
+    """Capture only budgets that greedy packing can select for each resolution."""
+
+    def __init__(self, vllm_config, device, dtype, model):
+        super().__init__(vllm_config, device, dtype, model)
+        self.token_budgets = sorted(set(self.token_budgets))
+        self.path_token_budgets = {path: sorted(set(budgets)) for path, budgets in self.path_token_budgets.items()}
+
+    def _capture_budgets(self, budgets, axis_keys):
+        tokens = self.model.get_capture_tokens_per_item(axis_keys)
+        max_items = min(self.max_batch_size, max(budgets) // tokens)
+        return {
+            self._find_smallest_fitting_budget_given_tokens(num_items * tokens, budgets)
+            for num_items in range(1, max_items + 1)
+        }
 
     def _capture_budget_graph(self, token_budget, path="default", axis_keys=()):
-        if token_budget < self.model.get_capture_tokens_per_item(axis_keys):
+        if token_budget not in self._capture_budgets(self.path_token_budgets[path], axis_keys):
             return
         super()._capture_budget_graph(token_budget, path=path, axis_keys=axis_keys)
 
     def _num_graphs_for_budgets(self, budgets):
         return sum(
-            budget >= self.model.get_capture_tokens_per_item(axis_keys)
-            for budget in budgets
-            for axis_keys in itertools.product(*self._capture_axes)
+            len(self._capture_budgets(budgets, axis_keys)) for axis_keys in itertools.product(*self._capture_axes)
         )
 
 
@@ -194,6 +205,9 @@ class HunyuanImage3EncoderCudaGraphManager:
         self.model = model
         self.vision = _BudgetedEncoderCudaGraphManager(vllm_config, device, dtype, _VisionEncoder(model))
         self.vae = _BudgetedEncoderCudaGraphManager(vllm_config, device, dtype, _VAEEncoder(model))
+        # VAE convolutions already run per image. Reuse one graph per resolution
+        # instead of capturing unrolled copies, and pack replay batches to match.
+        self.vae.max_batch_size = 1
         self.token_budgets = sorted(set(self.vision.token_budgets + self.vae.token_budgets))
 
     def supports_modality(self, modality):

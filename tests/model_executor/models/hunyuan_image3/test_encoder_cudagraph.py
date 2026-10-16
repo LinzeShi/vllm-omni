@@ -89,7 +89,7 @@ def test_sdpa_encoder_stays_eager():
     assert HunyuanImage3ForConditionalGeneration.create_encoder_cudagraph_manager(model, None, None, None) is None
 
 
-def _cpu_manager(budgets, *, image_base_size=1024, factor=16, tp_size=1):
+def _cpu_manager(budgets, *, max_items=2, image_base_size=1024, factor=16, tp_size=1):
     from vllm.config.multimodal import MultiModalConfig
 
     from vllm_omni.model_executor.models.hunyuan_image3.encoder_cudagraph import HunyuanImage3EncoderCudaGraphManager
@@ -97,7 +97,7 @@ def _cpu_manager(budgets, *, image_base_size=1024, factor=16, tp_size=1):
     config = SimpleNamespace(
         compilation_config=SimpleNamespace(
             encoder_cudagraph_token_budgets=budgets,
-            encoder_cudagraph_max_vision_items_per_batch=2,
+            encoder_cudagraph_max_vision_items_per_batch=max_items,
             encoder_cudagraph_max_frames_per_batch=None,
         ),
         model_config=SimpleNamespace(
@@ -106,6 +106,7 @@ def _cpu_manager(budgets, *, image_base_size=1024, factor=16, tp_size=1):
             )
         ),
         parallel_config=SimpleNamespace(tensor_parallel_size=tp_size),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32768),
     )
     model = SimpleNamespace(
         config=SimpleNamespace(image_base_size=image_base_size, hidden_size=2, vit_processor={"max_num_patches": 1024}),
@@ -116,13 +117,22 @@ def _cpu_manager(budgets, *, image_base_size=1024, factor=16, tp_size=1):
 
 @pytest.mark.cpu
 @pytest.mark.parametrize(
-    "budgets, expected_vision, expected_vae",
-    [([1024, 2048, 4096, 8192], 4, 74), ([1024, 3500, 4096], 3, 49), ([256, 512], 0, 0)],
+    "budgets, max_items, expected_vision, expected_vae",
+    [
+        ([1024, 2048, 4096, 8192], 2, [1024, 2048], 37),
+        ([1024, 2048, 4096], 2, [1024, 2048], 37),
+        (None, 0, [1024, 2048, 4096, 8192, 16384, 32768], 37),
+        (None, 2, [1024, 2048], 37),
+        ([1024, 3500, 4096], 2, [1024, 3500], 37),
+        ([1024, 3500, 4096], 0, [1024, 3500, 4096], 37),
+        ([1024, 1024, 3500, 4096], 2, [1024, 3500], 37),
+        ([256, 512], 2, [], 0),
+    ],
 )
-def test_capture_skips_unusable_budget_resolution_pairs(monkeypatch, budgets, expected_vision, expected_vae):
+def test_capture_only_selectable_budgets(monkeypatch, budgets, max_items, expected_vision, expected_vae):
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
-    manager = _cpu_manager(budgets)
+    manager = _cpu_manager(budgets, max_items=max_items)
     captured = []
 
     def record_capture(encoder, budget, path="default", axis_keys=()):
@@ -130,15 +140,82 @@ def test_capture_skips_unusable_budget_resolution_pairs(monkeypatch, budgets, ex
 
     # Exercise the real capture traversal, intercepting only the GPU operation.
     monkeypatch.setattr(EncoderCudaGraphManager, "_capture_budget_graph", record_capture)
-    assert manager.get_num_graphs_to_capture() == expected_vision + expected_vae
+    assert manager.get_num_graphs_to_capture() == len(expected_vision) + expected_vae
     manager.capture(object())
     vision = [(b, axes) for enc, b, axes in captured if enc is manager.vision]
     vae = [(b, axes) for enc, b, axes in captured if enc is manager.vae]
-    assert len(vision) == expected_vision
+    assert sorted(b for b, _ in vision) == expected_vision
     assert len(vae) == expected_vae
-    assert all(b >= 1024 for b, _ in vision)
+    assert len({axes for _, axes in vae}) == expected_vae
     assert all(b >= h * w // 16**2 for b, ((h, w),) in vae)
     assert len(captured) == manager.get_num_graphs_to_capture()
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("encoder_name", ["vision", "vae"])
+@pytest.mark.parametrize("budgets", [[1024, 2048, 4096, 8192], [1024, 3500, 4096], [8192], [256, 512]])
+def test_packing_uses_captured_graphs_and_preserves_outputs(monkeypatch, encoder_name, budgets):
+    from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+
+    wrapper = _cpu_manager(budgets)
+    manager = getattr(wrapper, encoder_name)
+    captured = set()
+
+    def record_capture(encoder, budget, path="default", axis_keys=()):
+        captured.add((budget, axis_keys))
+
+    monkeypatch.setattr(EncoderCudaGraphManager, "_capture_budget_graph", record_capture)
+    manager.capture(object())
+    ids = torch.arange(1, 4, dtype=torch.float32)
+    if encoder_name == "vision":
+        tokens = 1024
+        inputs = {
+            "pixels": ids[:, None, None].expand(-1, 1024, 1),
+            "mask": torch.ones(3, 1024, dtype=torch.bool),
+            "shapes": torch.tensor([[32, 32]] * 3),
+        }
+    else:
+        tokens = 4096
+        inputs = {"pixels": ids[:, None, None, None].expand(-1, 1, 1024, 1024)}
+        # Capture inputs must have the same one-image shape as replay batches.
+        for budget, axes in captured:
+            capture = manager.model.prepare_encoder_cudagraph_capture_inputs(
+                budget, manager.max_batch_size, 0, torch.device("cpu"), torch.float32, axis_keys=axes
+            )
+            assert capture.values["pixels"].shape[0] == 1
+
+    buffers: dict[tuple[int, tuple], torch.Tensor] = {}
+    replay_batches = []
+
+    def values(kwargs):
+        pixels = kwargs["pixels"]
+        image_ids = pixels[(slice(None),) + (0,) * (pixels.ndim - 1)]
+        return image_ids.repeat_interleave(tokens)[:, None].expand(-1, 2)
+
+    def replay(kwargs, budget, path="default", axis_keys=()):
+        key = (budget, axis_keys)
+        assert key in captured
+        count = len(kwargs["pixels"])
+        replay_batches.append(count)
+        capacity = min(manager.max_batch_size, budget // tokens) * tokens
+        buffer = buffers.setdefault(key, torch.empty(capacity, 2))
+        buffer[: count * tokens].copy_(values(kwargs))
+        return buffer
+
+    monkeypatch.setattr(manager, "_run_budget_graph", replay)
+    monkeypatch.setattr(manager.model, "encoder_eager_forward", lambda kwargs, path="default": values(kwargs))
+    outputs = manager.execute(inputs)
+    if captured:
+        assert replay_batches == ([1, 1, 1] if encoder_name == "vae" else [2, 1])
+    else:
+        assert not replay_batches
+        assert manager.graph_misses == 3
+    # Subsequent replays overwrite static buffers; earlier images must survive.
+    for buffer in buffers.values():
+        buffer.fill_(-1)
+    assert len(outputs) == 3
+    for image_id, output in zip(ids, outputs):
+        torch.testing.assert_close(output, torch.full((tokens, 2), image_id.item()))
 
 
 @pytest.mark.cpu
@@ -174,6 +251,8 @@ def test_data_mode_shards_and_gathers_in_input_order(monkeypatch, encoder_name, 
 
     def graph_output(kwargs, budget, path="default", axis_keys=()):
         selected = kwargs["pixels"].reshape(len(kwargs["pixels"]), -1)[:, 0].tolist()
+        if encoder_name == "vae":
+            assert len(selected) == 1
         local_ids.extend(selected)
         return torch.cat([expected[int(i) - 1] for i in selected])
 
@@ -429,10 +508,8 @@ def test_stage_graph_replay_matches_eager_and_preserves_rng(cuda_model):
     with graph_capture(device=torch.device("cuda")):
         manager.capture(torch.cuda.graph_pool_handle())
     assert torch.equal(state, torch.cuda.get_rng_state()), "capture must not sample VAE latents"
-    assert manager.get_num_graphs_to_capture() == 6
-    assert set(manager.vae.budget_graphs["default"]) == {
-        (budget, (resolution,)) for budget in (256, 512) for resolution in ((32, 32), (16, 64))
-    }
+    assert manager.get_num_graphs_to_capture() == 3
+    assert set(manager.vae.budget_graphs["default"]) == {(256, (resolution,)) for resolution in ((32, 32), (16, 64))}
     cases = [
         ([(32, 32)], 42),
         ([(32, 32), (32, 32)], 42),
