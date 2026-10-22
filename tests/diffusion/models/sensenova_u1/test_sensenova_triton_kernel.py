@@ -70,7 +70,10 @@ class KernelInput:
 
 
 try:
-    from vllm_omni.diffusion.models.sensenova_u1.fused_rmsnorm_rope import triton_qk_norm_rope
+    from vllm_omni.diffusion.models.sensenova_u1.fused_rmsnorm_rope import (
+        qk_norm_rope_kernel,
+        triton_qk_norm_rope,
+    )
 
     _TRITON_AVAILABLE = True
 except ImportError:
@@ -239,24 +242,31 @@ def test_fused_qk_norm_rope_matches_reference(seq_len: int, dtype: torch.dtype, 
 @pytest.mark.parametrize("seq_len", [1, 9, 260, 1024])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("batch_size", [1, 2])
-def test_fused_qk_writes_kv_into_resident_suffix(seq_len, dtype, batch_size):
+def test_fused_qk_writes_kv_into_resident_suffix(seq_len, dtype, batch_size, mocker):
     data = make_input(seq_len, dtype=dtype, device=DEVICE, seed=SEED, batch_size=batch_size)
     expected_q, expected_k = triton_qk_norm_rope(*data.args(), EPS)
     # Strided V matches a slice of a fused QKV projection.
     value = torch.randn(batch_size, seq_len, H_K * 3, HEAD_DIM, device=DEVICE, dtype=dtype)[:, :, H_K : 2 * H_K]
-    prefix, tail = 7, 3
-    k = torch.full((batch_size, prefix + seq_len + tail, H_K, HEAD_DIM), 17, device=DEVICE, dtype=dtype)
-    v = torch.full_like(k, 19)
-    key_out = k[:, prefix : prefix + seq_len].transpose(1, 2)
-    value_out = v[:, prefix : prefix + seq_len].transpose(1, 2)
-    q, got_k = triton_qk_norm_rope(*data.args(), EPS, key_output=key_out, value=value, value_output=value_out)
-    assert got_k.data_ptr() == key_out.data_ptr()
-    torch.testing.assert_close(q, expected_q, rtol=0, atol=0)
-    torch.testing.assert_close(got_k, expected_k, rtol=0, atol=0)
-    torch.testing.assert_close(value_out, value.transpose(1, 2), rtol=0, atol=0)
-    assert q.transpose(1, 2).is_contiguous()
-    assert torch.all(k[:, :prefix] == 17) and torch.all(k[:, -tail:] == 17)
-    assert torch.all(v[:, :prefix] == 19) and torch.all(v[:, -tail:] == 19)
+    launch = mocker.spy(qk_norm_rope_kernel, "run")
+    compiled_kernels = []
+    tail = 3
+    for prefix in (7, 64, 257):
+        k = torch.full((batch_size, prefix + seq_len + tail, H_K, HEAD_DIM), 17, device=DEVICE, dtype=dtype)
+        v = torch.full_like(k, 19)
+        key_out = k[:, prefix : prefix + seq_len].transpose(1, 2)
+        value_out = v[:, prefix : prefix + seq_len].transpose(1, 2)
+        q, got_k = triton_qk_norm_rope(*data.args(), EPS, key_output=key_out, value=value, value_output=value_out)
+        compiled_kernels.append(launch.spy_return)
+        assert got_k.data_ptr() == key_out.data_ptr()
+        torch.testing.assert_close(q, expected_q, rtol=0, atol=0)
+        torch.testing.assert_close(got_k, expected_k, rtol=0, atol=0)
+        torch.testing.assert_close(value_out, value.transpose(1, 2), rtol=0, atol=0)
+        assert q.transpose(1, 2).is_contiguous()
+        assert torch.all(k[:, :prefix] == 17) and torch.all(k[:, -tail:] == 17)
+        assert torch.all(v[:, :prefix] == 19) and torch.all(v[:, -tail:] == 19)
+    # Varying the prefix changes the output batch strides, not the kernel.
+    assert compiled_kernels[0] is not None
+    assert all(kernel is compiled_kernels[0] for kernel in compiled_kernels)
 
 
 @triton_available

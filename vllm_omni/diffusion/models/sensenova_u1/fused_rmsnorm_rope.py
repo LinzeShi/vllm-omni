@@ -35,7 +35,7 @@ def qk_norm_rope_kernel(
     query_stride_h: tl.constexpr,
     query_stride_s: tl.constexpr,
     query_stride_d: tl.constexpr,
-    key_stride_b: tl.constexpr,
+    key_stride_b,  # Resident KV output batch strides vary with the prefix length.
     key_stride_h: tl.constexpr,
     key_stride_s: tl.constexpr,
     key_stride_d: tl.constexpr,
@@ -52,7 +52,7 @@ def qk_norm_rope_kernel(
     value_stride_s: tl.constexpr,
     value_stride_h: tl.constexpr,
     value_stride_d: tl.constexpr,
-    value_out_stride_b: tl.constexpr,
+    value_out_stride_b,
     value_out_stride_h: tl.constexpr,
     value_out_stride_s: tl.constexpr,
     value_out_stride_d: tl.constexpr,
