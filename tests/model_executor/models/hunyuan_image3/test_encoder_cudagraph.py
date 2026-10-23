@@ -4,7 +4,6 @@
 from contextlib import contextmanager
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 import torch
@@ -44,12 +43,12 @@ def test_replay_padding_keeps_tail_sequence_capacity():
 
 @pytest.mark.cpu
 @pytest.mark.parametrize("enabled,cuda", [(False, True), (True, False)])
-def test_stage_does_not_create_manager_when_disabled_or_non_cuda(monkeypatch, enabled, cuda):
+def test_stage_does_not_create_manager_when_disabled_or_non_cuda(monkeypatch, mocker, enabled, cuda):
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
     from vllm_omni.worker import gpu_model_runner
 
-    factory = Mock()
+    factory = mocker.Mock()
     model = SimpleNamespace(create_encoder_cudagraph_manager=factory)
     runner = object.__new__(OmniGPUModelRunner)
     runner.compilation_config = SimpleNamespace(cudagraph_mm_encoder=enabled)
@@ -89,7 +88,7 @@ def test_sdpa_encoder_stays_eager():
     assert HunyuanImage3ForConditionalGeneration.create_encoder_cudagraph_manager(model, None, None, None) is None
 
 
-def _cpu_manager(budgets, *, max_items=2, image_base_size=1024, factor=16, tp_size=1):
+def _cpu_manager(budgets, *, max_items=2, tp_size=1):
     from vllm.config.multimodal import MultiModalConfig
 
     from vllm_omni.model_executor.models.hunyuan_image3.encoder_cudagraph import HunyuanImage3EncoderCudaGraphManager
@@ -109,56 +108,70 @@ def _cpu_manager(budgets, *, max_items=2, image_base_size=1024, factor=16, tp_si
         scheduler_config=SimpleNamespace(max_num_batched_tokens=32768),
     )
     model = SimpleNamespace(
-        config=SimpleNamespace(image_base_size=image_base_size, hidden_size=2, vit_processor={"max_num_patches": 1024}),
-        vae=SimpleNamespace(ffactor_spatial=factor, dtype=torch.float32, config=SimpleNamespace(latent_channels=1)),
+        config=SimpleNamespace(hidden_size=2, vit_processor={"max_num_patches": 1024}),
     )
     return HunyuanImage3EncoderCudaGraphManager(config, torch.device("cpu"), torch.float32, model)
 
 
 @pytest.mark.cpu
 @pytest.mark.parametrize(
-    "budgets, max_items, expected_vision, expected_vae",
+    "budgets, max_items, expected_vision",
     [
-        ([1024, 2048, 4096, 8192], 2, [1024, 2048], 37),
-        ([1024, 2048, 4096], 2, [1024, 2048], 37),
-        (None, 0, [1024, 2048, 4096, 8192, 16384, 32768], 37),
-        (None, 2, [1024, 2048], 37),
-        ([1024, 3500, 4096], 2, [1024, 3500], 37),
-        ([1024, 3500, 4096], 0, [1024, 3500, 4096], 37),
-        ([1024, 1024, 3500, 4096], 2, [1024, 3500], 37),
-        ([256, 512], 2, [], 0),
+        ([1024, 2048, 4096, 8192], 2, [1024, 2048]),
+        ([1024, 2048, 4096], 2, [1024, 2048]),
+        (None, 0, [1024, 2048, 4096, 8192, 16384, 32768]),
+        (None, 2, [1024, 2048]),
+        ([1024, 3500, 4096], 2, [1024]),
+        ([1024, 3500, 4096], 0, [1024]),
+        ([1024, 1024, 3500, 4096], 2, [1024]),
+        ([4096, 12288], 8, [4096]),
+        ([1024, 2048, 4096, 16384], 16, [1024, 2048, 4096, 16384]),
+        ([256, 512], 2, []),
     ],
 )
-def test_capture_only_selectable_budgets(monkeypatch, budgets, max_items, expected_vision, expected_vae):
+def test_capture_only_selectable_budgets(monkeypatch, budgets, max_items, expected_vision):
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
     manager = _cpu_manager(budgets, max_items=max_items)
     captured = []
 
     def record_capture(encoder, budget, path="default", axis_keys=()):
-        captured.append((encoder, budget, axis_keys))
+        assert encoder is manager.vision
+        assert path == "default" and axis_keys == ()
+        captured.append(budget)
 
     # Exercise the real capture traversal, intercepting only the GPU operation.
+    # The minimal model has no VAE: even inferred budgets must capture only vision.
     monkeypatch.setattr(EncoderCudaGraphManager, "_capture_budget_graph", record_capture)
-    assert manager.get_num_graphs_to_capture() == len(expected_vision) + expected_vae
+    assert manager.get_num_graphs_to_capture() == len(expected_vision)
     manager.capture(object())
-    vision = [(b, axes) for enc, b, axes in captured if enc is manager.vision]
-    vae = [(b, axes) for enc, b, axes in captured if enc is manager.vae]
-    assert sorted(b for b, _ in vision) == expected_vision
-    assert len(vae) == expected_vae
-    assert len({axes for _, axes in vae}) == expected_vae
-    assert all(b >= h * w // 16**2 for b, ((h, w),) in vae)
+    assert sorted(captured) == expected_vision
     assert len(captured) == manager.get_num_graphs_to_capture()
+    assert set(manager.get_cumulative_stats()["encoders"]) == {"vision"}
+    assert manager.is_captured()
+    manager.clear()
+    assert not manager.is_captured()
 
 
 @pytest.mark.cpu
-@pytest.mark.parametrize("encoder_name", ["vision", "vae"])
-@pytest.mark.parametrize("budgets", [[1024, 2048, 4096, 8192], [1024, 3500, 4096], [8192], [256, 512]])
-def test_packing_uses_captured_graphs_and_preserves_outputs(monkeypatch, encoder_name, budgets):
+@pytest.mark.parametrize("max_items", [1, 2, 8, 0])
+@pytest.mark.parametrize(
+    "budgets",
+    [
+        None,
+        [1024, 2048, 4096, 8192],
+        [1024, 3500, 4096],
+        [1024, 1024, 3500, 4096],
+        [4096, 12288],
+        [1024, 2048, 4096, 16384],
+        [8192],
+        [256, 512],
+    ],
+)
+def test_packing_uses_captured_graphs_and_preserves_outputs(monkeypatch, budgets, max_items):
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
-    wrapper = _cpu_manager(budgets)
-    manager = getattr(wrapper, encoder_name)
+    manager = _cpu_manager(budgets, max_items=max_items).vision
     captured = set()
 
     def record_capture(encoder, budget, path="default", axis_keys=()):
@@ -166,79 +179,77 @@ def test_packing_uses_captured_graphs_and_preserves_outputs(monkeypatch, encoder
 
     monkeypatch.setattr(EncoderCudaGraphManager, "_capture_budget_graph", record_capture)
     manager.capture(object())
-    ids = torch.arange(1, 4, dtype=torch.float32)
-    if encoder_name == "vision":
-        tokens = 1024
-        inputs = {
-            "pixels": ids[:, None, None].expand(-1, 1024, 1),
-            "mask": torch.ones(3, 1024, dtype=torch.bool),
-            "shapes": torch.tensor([[32, 32]] * 3),
-        }
-    else:
-        tokens = 4096
-        inputs = {"pixels": ids[:, None, None, None].expand(-1, 1, 1024, 1024)}
-        # Capture inputs must have the same one-image shape as replay batches.
-        for budget, axes in captured:
-            capture = manager.model.prepare_encoder_cudagraph_capture_inputs(
-                budget, manager.max_batch_size, 0, torch.device("cpu"), torch.float32, axis_keys=axes
-            )
-            assert capture.values["pixels"].shape[0] == 1
-
+    reference = EncoderCudaGraphManager(manager.vllm_config, manager.device, manager.dtype, manager.model)
+    tokens = manager.model.min_tokens
     buffers: dict[tuple[int, tuple], torch.Tensor] = {}
-    replay_batches = []
+    expected_replays = []
+    actual_replays = []
+    selected = set()
 
     def values(kwargs):
-        pixels = kwargs["pixels"]
-        image_ids = pixels[(slice(None),) + (0,) * (pixels.ndim - 1)]
+        image_ids = kwargs["pixels"][:, 0, 0]
         return image_ids.repeat_interleave(tokens)[:, None].expand(-1, 2)
+
+    def reference_replay(kwargs, budget, path="default", axis_keys=()):
+        # Run the unfiltered upstream manager to get the reference batches.
+        # Neither its packing nor this oracle calls our capture planner.
+        expected_replays.append((len(kwargs["pixels"]), budget, axis_keys))
+        return values(kwargs)
 
     def replay(kwargs, budget, path="default", axis_keys=()):
         key = (budget, axis_keys)
         assert key in captured
+        selected.add(key)
         count = len(kwargs["pixels"])
-        replay_batches.append(count)
+        actual_replays.append((count, budget, axis_keys))
         capacity = min(manager.max_batch_size, budget // tokens) * tokens
         buffer = buffers.setdefault(key, torch.empty(capacity, 2))
         buffer[: count * tokens].copy_(values(kwargs))
         return buffer
 
+    monkeypatch.setattr(reference, "_run_budget_graph", reference_replay)
     monkeypatch.setattr(manager, "_run_budget_graph", replay)
     monkeypatch.setattr(manager.model, "encoder_eager_forward", lambda kwargs, path="default": values(kwargs))
-    outputs = manager.execute(inputs)
-    if captured:
-        assert replay_batches == ([1, 1, 1] if encoder_name == "vae" else [2, 1])
-    else:
-        assert not replay_batches
-        assert manager.graph_misses == 3
-    # Subsequent replays overwrite static buffers; earlier images must survive.
-    for buffer in buffers.values():
-        buffer.fill_(-1)
-    assert len(outputs) == 3
-    for image_id, output in zip(ids, outputs):
-        torch.testing.assert_close(output, torch.full((tokens, 2), image_id.item()))
+    # Include partial batches and a request spanning multiple replay batches.
+    for num_images in range(1, manager.max_batch_size + 2):
+        ids = torch.arange(1, num_images + 1, dtype=torch.float32)
+        inputs = {
+            "pixels": ids[:, None, None].expand(-1, tokens, 1),
+            "mask": torch.ones(num_images, tokens, dtype=torch.bool),
+            "shapes": torch.tensor([[32, 32]] * num_images),
+        }
+        expected_replays.clear()
+        actual_replays.clear()
+        expected = reference.execute(inputs)
+        outputs = manager.execute(inputs)
+        assert actual_replays == expected_replays
+        # Subsequent replays overwrite static buffers; earlier images must survive.
+        for buffer in buffers.values():
+            buffer.fill_(-1)
+        assert len(outputs) == num_images
+        for image_id, output, ref in zip(ids, outputs, expected):
+            torch.testing.assert_close(output, ref)
+            torch.testing.assert_close(output, torch.full((tokens, 2), image_id.item()))
+    assert selected == captured
+    assert manager.graph_misses == reference.graph_misses
 
 
 @pytest.mark.cpu
-@pytest.mark.parametrize("encoder_name", ["vision", "vae"])
 @pytest.mark.parametrize("num_images", [1, 3])
 @pytest.mark.parametrize("rank", [0, 1])
-def test_data_mode_shards_and_gathers_in_input_order(monkeypatch, encoder_name, num_images, rank):
+def test_data_mode_shards_and_gathers_in_input_order(monkeypatch, mocker, num_images, rank):
     from vllm.v1.worker import encoder_cudagraph as upstream
 
     wrapper = _cpu_manager([1024, 2048, 4096, 8192], tp_size=2)
-    manager = getattr(wrapper, encoder_name)
+    manager = wrapper.vision
     assert manager.use_dp
     ids = torch.arange(1, num_images + 1, dtype=torch.float32)
-    if encoder_name == "vision":
-        inputs = {
-            "pixels": ids[:, None, None].expand(-1, 1024, 3),
-            "mask": torch.ones(num_images, 1024, dtype=torch.bool),
-            "shapes": torch.tensor([[32, 32]] * num_images),
-        }
-        tokens = 1024
-    else:
-        inputs = {"pixels": ids[:, None, None, None].expand(-1, 3, 1024, 1024)}
-        tokens = 4096
+    inputs = {
+        "pixels": ids[:, None, None].expand(-1, 1024, 3),
+        "mask": torch.ones(num_images, 1024, dtype=torch.bool),
+        "shapes": torch.tensor([[32, 32]] * num_images),
+    }
+    tokens = 1024
     expected = [torch.full((tokens, 2), float(i)) for i in range(1, num_images + 1)]
     assignments = [list(range(r, num_images, 2)) for r in range(2)]
     capacity = max(map(len, assignments)) * tokens
@@ -251,8 +262,6 @@ def test_data_mode_shards_and_gathers_in_input_order(monkeypatch, encoder_name, 
 
     def graph_output(kwargs, budget, path="default", axis_keys=()):
         selected = kwargs["pixels"].reshape(len(kwargs["pixels"]), -1)[:, 0].tolist()
-        if encoder_name == "vae":
-            assert len(selected) == 1
         local_ids.extend(selected)
         return torch.cat([expected[int(i) - 1] for i in selected])
 
@@ -265,7 +274,7 @@ def test_data_mode_shards_and_gathers_in_input_order(monkeypatch, encoder_name, 
 
     monkeypatch.setattr(upstream, "get_tensor_model_parallel_world_size", lambda: 2)
     monkeypatch.setattr(upstream, "get_tensor_model_parallel_rank", lambda: rank)
-    gather = Mock(side_effect=all_gather)
+    gather = mocker.Mock(side_effect=all_gather)
     monkeypatch.setattr(upstream, "tensor_model_parallel_all_gather", gather)
     monkeypatch.setattr(manager, "_run_budget_graph", graph_output)
     # Keep the actual upstream execute/shard/gather and greedy packing paths.
@@ -278,7 +287,7 @@ def test_data_mode_shards_and_gathers_in_input_order(monkeypatch, encoder_name, 
 
 
 @pytest.mark.cpu
-def test_vision_shape_fallback_preserves_model_data_parallel_path():
+def test_vision_shape_fallback_preserves_model_data_parallel_path(mocker):
     from vllm_omni.model_executor.models.hunyuan_image3.encoder_cudagraph import HunyuanImage3EncoderCudaGraphManager
     from vllm_omni.model_executor.models.hunyuan_image3.hunyuan_image3 import HunyuanImage3ForConditionalGeneration
 
@@ -296,20 +305,62 @@ def test_vision_shape_fallback_preserves_model_data_parallel_path():
                 "vae_pixel_values": [],
             }
         },
-        _vit_encode_dp=Mock(return_value=embeddings),
+        _vit_encode_dp=mocker.Mock(return_value=embeddings),
         vision_aligner=lambda x: x,
-        _combine_image_embeddings=Mock(return_value=[embeddings[0]]),
+        _encode_vae_tokens=mocker.Mock(return_value=[]),
+        _combine_image_embeddings=mocker.Mock(return_value=[embeddings[0]]),
     )
     model._vit_encode = lambda *args: HunyuanImage3ForConditionalGeneration._vit_encode(model, *args)
     manager = object.__new__(HunyuanImage3EncoderCudaGraphManager)
     manager.model = model
-    manager.vision = SimpleNamespace(model=SimpleNamespace(min_tokens=4), graph_misses=0, execute=Mock())
-    manager.vae = SimpleNamespace(model=SimpleNamespace(factor=16))
+    manager.vision = SimpleNamespace(model=SimpleNamespace(min_tokens=4), graph_misses=0, execute=mocker.Mock())
     actual = manager.execute({})
     model._vit_encode_dp.assert_called_once_with(pixels, mask, shapes)
+    model._encode_vae_tokens.assert_called_once_with([], None)
     manager.vision.execute.assert_not_called()
     assert manager.vision.graph_misses == 1
     torch.testing.assert_close(actual[0], embeddings[0])
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("seed_values", [None, [], [0], [42, 42, 42]])
+def test_vae_tokens_preserve_image_order_and_generator_state(monkeypatch, seed_values):
+    from vllm_omni.model_executor.models.hunyuan_image3.hunyuan_image3 import HunyuanImage3ForConditionalGeneration
+
+    model = object.__new__(HunyuanImage3ForConditionalGeneration)
+    nn.Module.__init__(model)
+    images = [torch.full((3, h, w), float(i)) for i, (h, w) in enumerate([(2, 3), (3, 2), (2, 3)])]
+    seed = None if seed_values is None else torch.tensor(seed_values, dtype=torch.long)
+    calls = []
+
+    def encode(image, cfg_factor=1, generator=None):
+        calls.append((image, cfg_factor, generator))
+        return torch.tensor([2.0]), image + torch.rand(image.shape, generator=generator)
+
+    monkeypatch.setattr(model, "_vae_encode", encode)
+    monkeypatch.setattr(model, "time_embed", lambda t: t + 5, raising=False)
+    monkeypatch.setattr(model, "patch_embed", lambda latents, time: (latents + time, None, None), raising=False)
+    # Independently predict the random draws, without calling either encoding
+    # path. A shared bug in their helper must not make the comparison pass.
+    seeded = bool(seed_values)
+    reference = torch.Generator().manual_seed(seed_values[0] if seeded else 123)
+    expected = [image.unsqueeze(0) + torch.rand((1, *image.shape), generator=reference) + 7 for image in images]
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(123)
+        before = torch.get_rng_state()
+        actual = model._encode_vae_tokens(images, seed)
+        assert torch.equal(torch.get_rng_state(), before if seeded else reference.get_state())
+    assert len(calls) == len(actual) == len(images)
+    generator = calls[0][2]
+    if seeded:
+        assert generator is not None
+        assert torch.equal(generator.get_state(), reference.get_state())
+    else:
+        assert generator is None
+    for (image, cfg_factor, used_generator), original, output, expected_output in zip(calls, images, actual, expected):
+        assert cfg_factor == 1 and used_generator is generator
+        torch.testing.assert_close(image, original.unsqueeze(0), rtol=0, atol=0)
+        torch.testing.assert_close(output, expected_output, rtol=0, atol=0)
 
 
 class _LanguageModel(nn.Module):
@@ -354,6 +405,7 @@ def _cuda_encoder_model(tmp_path, dtype, *, rank=0, world_size=1):
     config.parallel_config = ParallelConfig(tensor_parallel_size=world_size)
     config.model_config = SimpleNamespace(
         is_moe=False,
+        sleep_mode_offload_cudagraph=False,
         multimodal_config=MultiModalConfig(
             limit_per_prompt={"image": 4, "video": 0}, mm_encoder_tp_mode="data" if world_size > 1 else "weights"
         ),
@@ -426,9 +478,6 @@ def _cuda_encoder_model(tmp_path, dtype, *, rank=0, world_size=1):
             runner.vllm_config, runner.device, runner.dtype = config, torch.device("cuda"), dtype
             runner.get_model = lambda: model
             manager = runner._create_encoder_cudagraph_manager()
-            # Keep the fixture small while capturing a few real VAE resolutions.
-            manager.vae.model.resolutions = ((32, 32), (16, 64), (64, 64))
-            manager.vae._capture_axes = (manager.vae.model.resolutions,)
             try:
                 yield model, manager
             finally:
@@ -500,17 +549,24 @@ def _run_stage(model, manager, inputs):
 
 @pytest.mark.nvidia_only
 @hardware_test(res={"cuda": "L4"}, num_cards=1)
+@pytest.mark.parametrize("sparse_budgets", [False, True])
 @torch.inference_mode()
-def test_stage_graph_replay_matches_eager_and_preserves_rng(cuda_model):
+def test_stage_graph_replay_matches_eager_and_preserves_rng(cuda_model, mocker, sparse_budgets):
     model, manager = cuda_model
+    if sparse_budgets:
+        # Four-patch equivalent of the 1024/3500/4096 packing regression.
+        manager.vision.token_budgets = [4, 13, 16]
+        manager.vision.path_token_budgets = {"default": [4, 13, 16]}
     state = torch.cuda.get_rng_state()
     from vllm.distributed import graph_capture
 
     with graph_capture(device=torch.device("cuda")):
         manager.capture(torch.cuda.graph_pool_handle())
     assert torch.equal(state, torch.cuda.get_rng_state()), "capture must not sample VAE latents"
-    assert manager.get_num_graphs_to_capture() == 3
-    assert set(manager.vae.budget_graphs["default"]) == {(256, (resolution,)) for resolution in ((32, 32), (16, 64))}
+    assert manager.get_num_graphs_to_capture() == 1
+    assert set(manager.vision.budget_graphs["default"]) == {4 if sparse_budgets else 256}
+    vae_encode = mocker.spy(model, "_vae_encode")
+    replay = mocker.spy(manager.vision, "_run_budget_graph")
     cases = [
         ([(32, 32)], 42),
         ([(32, 32), (32, 32)], 42),
@@ -523,10 +579,14 @@ def test_stage_graph_replay_matches_eager_and_preserves_rng(cuda_model):
     for sizes, seed in cases:
         inputs = _inputs(sizes, seed, model.vae.dtype)
         state = torch.cuda.get_rng_state()
+        vae_encode.reset_mock()
         eager = _run_stage(model, None, inputs)
+        assert vae_encode.call_count == len(sizes)
+        vae_encode.reset_mock()
         after_eager = torch.cuda.get_rng_state()
         torch.cuda.set_rng_state(state)
         graph = _run_stage(model, manager, inputs)
+        assert vae_encode.call_count == len(sizes)
         assert torch.equal(after_eager, torch.cuda.get_rng_state())
         assert len(graph) == len(eager)
         for expected, actual in zip(eager, graph):
@@ -535,36 +595,32 @@ def test_stage_graph_replay_matches_eager_and_preserves_rng(cuda_model):
             # Splitting a vision batch can change reduced-precision GEMM rounding.
             tolerance = 2 * torch.finfo(expected.dtype).eps
             torch.testing.assert_close(actual[-patches:], expected[-patches:], rtol=tolerance, atol=tolerance)
-    assert manager.vision.graph_hits > 0 and manager.vae.graph_hits > 0
-    assert manager.vae.graph_misses == 2
+    assert manager.vision.graph_hits > 0
+    if sparse_budgets:
+        assert all(len(call.args[0]["pixels"]) == 1 for call in replay.call_args_list)
 
 
 @pytest.mark.nvidia_only
 @hardware_test(res={"cuda": "L4"}, num_cards=1)
-@pytest.mark.parametrize("capture_vision", [True, False])
 @torch.inference_mode()
-def test_unusable_capture_budgets_fall_back_to_eager(cuda_model, capture_vision):
+def test_unusable_capture_budgets_fall_back_to_eager(cuda_model):
     from vllm.distributed import graph_capture
 
     model, manager = cuda_model
-    manager.vae.token_budgets = [128]
-    manager.vae.path_token_budgets = {"default": [128]}
-    if not capture_vision:
-        manager.vision.token_budgets = [2]
-        manager.vision.path_token_budgets = {"default": [2]}
-    assert manager.vae.get_num_graphs_to_capture() == 0
+    manager.vision.token_budgets = [2]
+    manager.vision.path_token_budgets = {"default": [2]}
+    assert manager.get_num_graphs_to_capture() == 0
     with graph_capture(device=torch.device("cuda")):
         manager.capture(torch.cuda.graph_pool_handle())
     assert manager.is_captured()
-    assert not manager.vae.budget_graphs
+    assert not manager.vision.budget_graphs
     inputs = _inputs([(32, 32), (16, 64)], dtype=model.vae.dtype)
     expected = _run_stage(model, None, inputs)
     actual = _run_stage(model, manager, inputs)
     for result, reference in zip(actual, expected):
         torch.testing.assert_close(result, reference, rtol=0, atol=0)
-    assert manager.vae.graph_hits == 0
-    assert manager.vae.graph_misses == 2
-    assert (manager.vision.graph_hits > 0) == capture_vision
+    assert manager.vision.graph_hits == 0
+    assert manager.vision.graph_misses == 2
 
 
 @torch.inference_mode()
@@ -572,16 +628,16 @@ def _data_parallel_worker(rank, tmp_path, dtype):
     from vllm.distributed import graph_capture
 
     with _cuda_encoder_model(tmp_path, dtype, rank=rank, world_size=2) as (model, manager):
-        assert manager.vision.use_dp and manager.vae.use_dp
+        assert manager.vision.use_dp
         with graph_capture(device=torch.device("cuda", rank)):
             manager.capture(torch.cuda.graph_pool_handle())
         # One image leaves a rank empty. Three images exercise uneven sharding,
-        # VAE resolution regrouping and reconstruction of the original order.
+        # SigLIP2 gather order with differently sized eager VAE inputs.
         cases = [
             ([(32, 32)], False, 42),
             ([(32, 32), (16, 64), (32, 32)], False, 42),
             ([(32, 32), (16, 64), (32, 32)], False, None),
-            ([(64, 64)], False, 42),  # Known resolution, above every budget.
+            ([(64, 64)], False, 42),  # VAE size is independent of graph budgets.
             ([(32, 32)], True, 42),
         ]
         for index, (sizes, shape_fallback, seed) in enumerate(cases):
@@ -606,7 +662,7 @@ def _data_parallel_worker(rank, tmp_path, dtype):
                 torch.testing.assert_close(result[-patches:], reference[-patches:], rtol=tolerance, atol=tolerance)
         assert manager.vision.graph_misses == 1  # Shape fallback on both ranks.
         if rank == 0:
-            assert manager.vision.graph_hits > 0 and manager.vae.graph_hits > 0
+            assert manager.vision.graph_hits > 0
 
 
 @pytest.mark.nvidia_only

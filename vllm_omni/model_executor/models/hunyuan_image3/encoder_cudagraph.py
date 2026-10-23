@@ -108,10 +108,23 @@ class _BudgetedEncoderCudaGraphManager(EncoderCudaGraphManager):
     def _capture_budgets(self, budgets: list[int]) -> set[int]:
         tokens = self.model.min_tokens
         max_items = min(self.max_batch_size, max(budgets) // tokens)
-        return {
-            self._find_smallest_fitting_budget_given_tokens(num_items * tokens, budgets)
-            for num_items in range(1, max_items + 1)
-        }
+        if max_items == 0:
+            return set()
+        single_budget = self._find_smallest_fitting_budget_given_tokens(tokens, budgets)
+        assert single_budget is not None
+        selected = {single_budget}
+        current_budget = single_budget
+        for num_items in range(2, max_items + 1):
+            merged_budget = self._find_smallest_fitting_budget_given_tokens(num_items * tokens, budgets)
+            assert merged_budget is not None
+            # Match vLLM 0.32's should_defer_item. Every SigLIP2 item has
+            # the same padded size, so once a batch closes, later batches
+            # repeat it; no larger batch can be selected.
+            if current_budget + single_budget < merged_budget and single_budget >= current_budget:
+                break
+            selected.add(merged_budget)
+            current_budget = merged_budget
+        return selected
 
     def _capture_budget_graph(self, token_budget, path="default", axis_keys=()):
         if token_budget not in self._capture_budgets(self.path_token_budgets[path]):
