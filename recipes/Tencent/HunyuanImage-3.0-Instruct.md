@@ -72,7 +72,7 @@ layout.
 
 ### AR image encoder CUDA graphs
 
-Encoder graphs are off by default. For a lower-memory opt-in configuration, copy
+Encoder graphs are off by default. To enable SigLIP2 CUDA graphs, copy
 `vllm_omni/deploy/hunyuan_image3_ar.yaml` and add the following settings to
 stage 0:
 
@@ -85,25 +85,18 @@ compilation_config:
 ```
 
 Pass the copied file with `--deploy-config`. With Instruct revision `2ec2c78`,
-these settings capture 2 SigLIP2 graphs and leave the VAE eager: its smallest
-resolution bucket needs 3072 latent positions, exceeding the largest budget.
-This is a consequence of this checkpoint's resolution buckets, not a separate
-VAE switch. Check the captured graph counts when changing the checkpoint or
-processor settings. Use `cudagraph_mm_encoder: false` with otherwise identical
+these settings capture 2 SigLIP2 graphs. VAE encoding and sampling always use
+the model's ordinary eager path, including with automatically inferred budgets.
+Use `cudagraph_mm_encoder: false` with otherwise identical
 settings to measure the effect of encoder graphs.
 
-SigLIP2 and the VAE encoder use separate graph sets. SigLIP2 positional
-interpolation runs before replay; VAE graphs return distribution parameters,
-with sampling performed afterward using the original request generator and
-image order. VAE graphs cover the processor's resolution buckets, with one
-single-image graph per supported resolution. Multiple images reuse these
-graphs in separate replays. Inputs outside those buckets or above the largest
-token budget run eagerly.
-The token budgets apply to each encoder independently: a square 1024-pixel
-image has 1024 SigLIP2 tokens and 4096 VAE latent positions. Only budgets that
-replay can select are captured. Adding `4096` to the settings above also
-captures 37 VAE graphs with this checkpoint. Increasing the vision batch
-limit or token budgets can increase capture time and memory use.
+SigLIP2 positional interpolation runs before replay. The budgets count padded
+SigLIP2 patches per batch, not VAE latent positions. Only budgets that upstream
+packing can select are captured: with `[1024, 3500, 4096]` and 1024-patch images,
+vLLM 0.32 runs each image with the 1024 graph instead of padding two images to
+3500 tokens. Unsupported patch counts and images above every budget run eagerly.
+Increasing the vision batch limit or token budgets can increase capture time
+and memory use. Check graph counts when changing the checkpoint or processor.
 
 Torch SDPA vision attention stays eager because its variable-length path is
 not graph-safe. The startup log reports encoder manager initialization and captured graph
@@ -117,41 +110,37 @@ Startup also captures the encoder graphs once for profiling and again for
 serving. Check the startup log for the graph reserve and available KV cache;
 explicit KV cache sizing bypasses this automatic reserve.
 
-On the same 4×A100-SXM4-80GB host with TP=4, vLLM 0.31.0, PyTorch 2.13.0,
-CUDA 13.0, Instruct revision `2ec2c78`,
-`gpu_memory_utilization: 0.75`, and `max_num_batched_tokens: 32768`, a
-single-concurrency image-to-text run measured:
+The following reference measurements used 4×A100-SXM4-80GB with TP=4,
+vLLM 0.31.0,
+PyTorch 2.13.0, CUDA 13.0, Instruct revision `2ec2c78`,
+`gpu_memory_utilization: 0.75`, and `max_num_batched_tokens: 32768` for a
+single-concurrency image-to-text workload. These measurements predate the
+vLLM 0.32 update.
 
 | Encoder graph configuration | Encoder graphs | Total graph reserve per GPU | Available KV cache per GPU | Startup |
 | --- | ---: | ---: | ---: | ---: |
 | Disabled | 0 | 0.07 GiB | 13.00 GiB | 258 s |
-| SigLIP2 only, settings above | 2 | 0.17 GiB | 12.90 GiB | 249 s |
-| SigLIP2 + VAE, add `4096` | 39 | 6.64 GiB | 6.43 GiB | 282 s |
+| SigLIP2 only | 2 | 0.17 GiB | 12.90 GiB | 249 s |
 
 The reserve is the graph memory estimate used for automatic KV cache sizing;
 it includes decoder graphs and is not total process memory. SigLIP2-only adds
-102 MiB per GPU over disabled. Adding VAE graphs reserves another 6.47 GiB
-per GPU. Startup is one launch per configuration with fresh compilation
-caches, excluding environment setup and model download; it does not establish
-a repeatable startup speedup.
+102 MiB per GPU over disabled. Startup was measured once per configuration
+with fresh compilation caches, excluding setup and model download.
 
 Median whole-request latency, in milliseconds:
 
-| Input | Disabled | SigLIP2 only | SigLIP2 + VAE |
-| --- | ---: | ---: | ---: |
-| One image | 1007.50 | 1000.16 | 994.50 |
-| Two images, same dimensions | 2058.56 | 2043.81 | 2045.32 |
-| Two images, different dimensions | 2056.93 | 2041.98 | 2040.54 |
+| Input | Disabled | SigLIP2 only |
+| --- | ---: | ---: |
+| One image | 1007.50 | 1000.16 |
+| Two images, same dimensions | 2058.56 | 2043.81 |
+| Two images, different dimensions | 2056.93 | 2041.98 |
 
 Each case used three rounds of two warmups and ten measured requests, with
 one output token per request and prefix caching disabled. HTTP timing was
 separate from synchronized encoder diagnostics. SigLIP2-only request medians
-were about 0.7% lower than disabled. Adding VAE graphs changed request medians
-by only a few milliseconds, with mixed direction across cases, despite the
-larger memory cost. Configurations ran sequentially, so small differences can
-include run-to-run variation; these are not throughput measurements or a
-guaranteed speedup. Start with SigLIP2-only when evaluating the opt-in path,
-and keep encoder graphs disabled unless your workload benefits.
+were about 0.7% lower than disabled. Configurations ran sequentially, so small
+differences can include run-to-run variation. Benchmark your workload before
+enabling encoder graphs.
 
 ### Shared T2I/IT2I offline examples
 

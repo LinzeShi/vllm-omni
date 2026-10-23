@@ -92,10 +92,7 @@ from vllm_omni.model_executor.models.hunyuan_image3._hunyuan_v1_vendored import 
     _get_cla_factor,
     _is_moe,
 )
-from vllm_omni.model_executor.models.hunyuan_image3.autoencoder_kl_3d import (
-    AutoencoderKLConv3D,
-    DiagonalGaussianDistribution,
-)
+from vllm_omni.model_executor.models.hunyuan_image3.autoencoder_kl_3d import AutoencoderKLConv3D
 from vllm_omni.model_executor.models.hunyuan_image3.siglip2 import LightProjector, Siglip2VisionTransformer
 
 logger = init_logger(__name__)
@@ -1820,6 +1817,8 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
         """
         Encode images through VAE encoder.
         """
+        config = self.vae.config
+
         # Cast pixel input to model dtype here (at the encoder boundary)
         # rather than inside HunyuanImage3Processor.process_image. This
         # matches HF's path which keeps fp32 pixels in build_cond_images and
@@ -1832,16 +1831,8 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
         if images.dtype != self.vae.dtype:
             images = images.to(dtype=self.vae.dtype)
 
-        return self._sample_vae_latents(self.vae.encode(images).latent_dist, cfg_factor, generator)
-
-    def _sample_vae_latents(
-        self,
-        latent_dist: DiagonalGaussianDistribution,
-        cfg_factor: int = 1,
-        generator: torch.Generator | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        config = self.vae.config
-        latents = latent_dist.sample(generator)
+        vae_encode_result = self.vae.encode(images)
+        latents = vae_encode_result.latent_dist.sample(generator)
 
         # Apply shift and scaling factors if present
         if hasattr(config, "shift_factor") and config.shift_factor:
@@ -1967,32 +1958,32 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
         if image_input is None:
             return []
 
-        vae_cfg_factor = 1
         pixel_values = image_input["pixel_values"]
         vit_pixel_values = pixel_values["vit_pixel_values"]
         vit_pixel_attention_mask = pixel_values["vit_pixel_attention_mask"]
         vit_spatial_shapes = pixel_values["vit_spatial_shapes"]
-        vae_pixel_values = pixel_values["vae_pixel_values"]
-        vae_generator_seed = pixel_values.get("vae_generator_seed")
-        vae_generator = None
-        if vae_generator_seed is not None and vae_generator_seed.numel() > 0:
-            vae_generator = torch.Generator(device=vae_pixel_values[0].device).manual_seed(
-                int(vae_generator_seed.reshape(-1)[0].item())
-            )
-
         # Perform ViT encoding
         vit_embeddings = self._vit_encode(vit_pixel_values, vit_pixel_attention_mask, vit_spatial_shapes)
+        vae_token_embeddings = self._encode_vae_tokens(
+            pixel_values["vae_pixel_values"], pixel_values.get("vae_generator_seed")
+        )
+        return self._combine_image_embeddings(vit_embeddings, vae_token_embeddings)
+
+    def _encode_vae_tokens(self, images: list[torch.Tensor], seed: torch.Tensor | None = None) -> list[torch.Tensor]:
+        """Encode and sample VAE inputs in image order for both vision paths."""
+        generator = None
+        if seed is not None and seed.numel() > 0:
+            generator = torch.Generator(device=images[0].device).manual_seed(int(seed.reshape(-1)[0].item()))
 
         # VAE encode + patch_embed per image — each cond image is at its own
         # `reso_group` bucket so shapes are ragged across the image-batch dim.
         vae_token_embeddings = []
-        for vae_image_i in vae_pixel_values:
-            t_i, latents_i = self._vae_encode(vae_image_i.unsqueeze(0), vae_cfg_factor, generator=vae_generator)
+        for image in images:
+            t_i, latents_i = self._vae_encode(image.unsqueeze(0), generator=generator)
             t_emb = self.time_embed(t_i[0])
             vae_tokens, _, _ = self.patch_embed(latents_i, t_emb)
             vae_token_embeddings.append(vae_tokens)
-
-        return self._combine_image_embeddings(vit_embeddings, vae_token_embeddings)
+        return vae_token_embeddings
 
     def _combine_image_embeddings(
         self, vit_embeddings: torch.Tensor, vae_token_embeddings: list[torch.Tensor]

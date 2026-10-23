@@ -1,22 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
-import itertools
-from collections import defaultdict
 from typing import Any
 
 import torch
 from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 from vllm.v1.worker.encoder_cudagraph_defs import (
-    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG,
     EncoderCudaGraphCaptureInputs,
     EncoderCudaGraphConfig,
     EncoderCudaGraphReplayBuffers,
     EncoderItemSpec,
 )
-
-from .autoencoder_kl_3d import DiagonalGaussianDistribution
 
 
 def _pad_cu_seqlens(buffer: torch.Tensor, source: torch.Tensor) -> None:
@@ -26,9 +21,10 @@ def _pad_cu_seqlens(buffer: torch.Tensor, source: torch.Tensor) -> None:
     buffer[-1].copy_(capacity)
 
 
-class _Encoder(SupportsEncoderCudaGraph):
+class _VisionEncoder(SupportsEncoderCudaGraph):
     def __init__(self, model):
         self.model = model
+        self.min_tokens = model.config.vit_processor["max_num_patches"]
 
     def get_input_modality(self, mm_kwargs):
         return "image"
@@ -39,17 +35,8 @@ class _Encoder(SupportsEncoderCudaGraph):
     def get_encoder_cudagraph_budget_range(self, vllm_config):
         return self.min_tokens, max(self.min_tokens, vllm_config.scheduler_config.max_num_batched_tokens)
 
-    def get_capture_tokens_per_item(self, axis_keys):
-        return self.min_tokens
-
     def select_encoder_cudagraph_items(self, mm_kwargs, indices):
         return {key: value[indices] for key, value in mm_kwargs.items()}
-
-
-class _VisionEncoder(_Encoder):
-    def __init__(self, model):
-        super().__init__(model)
-        self.min_tokens = model.config.vit_processor["max_num_patches"]
 
     def get_encoder_cudagraph_config(self):
         return EncoderCudaGraphConfig(
@@ -110,77 +97,16 @@ class _VisionEncoder(_Encoder):
         return self.model.vision_aligner(hidden).flatten(0, 1)
 
 
-class _VAEEncoder(_Encoder):
-    def __init__(self, model):
-        super().__init__(model)
-        from vllm_omni.diffusion.models.hunyuan_image3.hunyuan_image3_transformer import (
-            HUNYUAN_IMAGE3_EXTRA_RESOLUTIONS,
-        )
-
-        from .hunyuan_image3 import HunyuanImage3Processor
-
-        group = HunyuanImage3Processor.ResolutionGroup(
-            base_size=model.config.image_base_size,
-            extra_resolutions=[HunyuanImage3Processor.Resolution(s) for s in HUNYUAN_IMAGE3_EXTRA_RESOLUTIONS],
-        )
-        self.resolutions = tuple((r.height, r.width) for r in group.data)
-        self.factor = model.vae.ffactor_spatial
-        self.min_tokens = min(h * w // self.factor**2 for h, w in self.resolutions)
-
-    def get_encoder_cudagraph_config(self):
-        return EncoderCudaGraphConfig(
-            modalities=["image"],
-            buffer_keys=["pixels"],
-            out_hidden_size=2 * self.model.vae.config.latent_channels,
-            capture_axes=(self.resolutions,),
-        )
-
-    def get_capture_tokens_per_item(self, axis_keys):
-        height, width = axis_keys[0]
-        return height * width // self.factor**2
-
-    def get_encoder_cudagraph_item_specs(self, mm_kwargs):
-        pixels = mm_kwargs["pixels"]
-        tokens = pixels.shape[-2] * pixels.shape[-1] // self.factor**2
-        return [EncoderItemSpec(tokens, tokens) for _ in pixels]
-
-    def select_encoder_cudagraph_items(self, mm_kwargs, indices):
-        selected = super().select_encoder_cudagraph_items(mm_kwargs, indices)
-        selected[ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG] = (tuple(mm_kwargs["pixels"].shape[-2:]),)
-        return selected
-
-    def prepare_encoder_cudagraph_capture_inputs(
-        self, token_budget, max_batch_size, max_frames_per_batch, device, dtype, path="default", axis_keys=None
-    ):
-        height, width = axis_keys[0]
-        tokens = self.get_capture_tokens_per_item(axis_keys)
-        batch = min(max_batch_size, token_budget // tokens)
-        return EncoderCudaGraphCaptureInputs(
-            values={"pixels": torch.zeros(batch, 3, height, width, device=device, dtype=self.model.vae.dtype)}
-        )
-
-    def prepare_encoder_cudagraph_replay_buffers(self, mm_kwargs, max_batch_size, max_frames_per_batch, path="default"):
-        return EncoderCudaGraphReplayBuffers(values={"pixels": mm_kwargs["pixels"].to(self.model.vae.dtype)})
-
-    def encoder_cudagraph_forward(self, inputs, path="default"):
-        # Preserve the eager path's per-image convolutions, including VAE tiling.
-        parameters = [self.model.vae.encode(image.unsqueeze(0)).latent_dist.parameters for image in inputs["pixels"]]
-        return torch.cat([p.movedim(1, -1).reshape(-1, p.shape[1]) for p in parameters])
-
-    def encoder_eager_forward(self, mm_kwargs, path="default"):
-        return self.encoder_cudagraph_forward({"pixels": mm_kwargs["pixels"].to(self.model.vae.dtype)})
-
-
 class _BudgetedEncoderCudaGraphManager(EncoderCudaGraphManager):
-    """Capture only budgets that greedy packing can select for each resolution."""
+    """Capture only budgets selected by vLLM's fixed-size SigLIP2 packing."""
 
     def __init__(self, vllm_config, device, dtype, model):
         super().__init__(vllm_config, device, dtype, model)
         self.token_budgets = sorted(set(self.token_budgets))
         self.path_token_budgets = {path: sorted(set(budgets)) for path, budgets in self.path_token_budgets.items()}
 
-    def _capture_budgets(self, budgets, axis_keys):
-        tokens = self.model.get_capture_tokens_per_item(axis_keys)
+    def _capture_budgets(self, budgets: list[int]) -> set[int]:
+        tokens = self.model.min_tokens
         max_items = min(self.max_batch_size, max(budgets) // tokens)
         return {
             self._find_smallest_fitting_budget_given_tokens(num_items * tokens, budgets)
@@ -188,55 +114,40 @@ class _BudgetedEncoderCudaGraphManager(EncoderCudaGraphManager):
         }
 
     def _capture_budget_graph(self, token_budget, path="default", axis_keys=()):
-        if token_budget not in self._capture_budgets(self.path_token_budgets[path], axis_keys):
+        if token_budget not in self._capture_budgets(self.path_token_budgets[path]):
             return
         super()._capture_budget_graph(token_budget, path=path, axis_keys=axis_keys)
 
     def _num_graphs_for_budgets(self, budgets):
-        return sum(
-            len(self._capture_budgets(budgets, axis_keys)) for axis_keys in itertools.product(*self._capture_axes)
-        )
+        return len(self._capture_budgets(budgets))
 
 
 class HunyuanImage3EncoderCudaGraphManager:
-    """Use upstream capture/replay independently for the two encoder layouts."""
+    """Replay SigLIP2 graphs and keep VAE encoding on the model's eager path."""
 
     def __init__(self, vllm_config, device, dtype, model):
         self.model = model
         self.vision = _BudgetedEncoderCudaGraphManager(vllm_config, device, dtype, _VisionEncoder(model))
-        self.vae = _BudgetedEncoderCudaGraphManager(vllm_config, device, dtype, _VAEEncoder(model))
-        # VAE convolutions already run per image. Reuse one graph per resolution
-        # instead of capturing unrolled copies, and pack replay batches to match.
-        self.vae.max_batch_size = 1
-        self.token_budgets = sorted(set(self.vision.token_budgets + self.vae.token_budgets))
+        self.token_budgets = self.vision.token_budgets
 
     def supports_modality(self, modality):
         return modality == "image"
 
     def get_num_graphs_to_capture(self):
-        return self.vision.get_num_graphs_to_capture() + self.vae.get_num_graphs_to_capture()
+        return self.vision.get_num_graphs_to_capture()
 
     def capture(self, graph_pool):
         self.vision.capture(graph_pool)
-        self.vae.capture(graph_pool)
 
     def clear(self):
         self.vision.clear()
-        self.vae.clear()
 
     def is_captured(self):
-        return self.vision.is_captured() and self.vae.is_captured()
+        return self.vision.is_captured()
 
     def get_cumulative_stats(self):
-        encoders = {"vision": self.vision.get_cumulative_stats(), "vae": self.vae.get_cumulative_stats()}
-        hits = sum(s["graph_hits"] for s in encoders.values())
-        misses = sum(s["graph_misses"] for s in encoders.values())
-        return {
-            "graph_hits": hits,
-            "graph_misses": misses,
-            "hit_rate": hits / max(1, hits + misses),
-            "encoders": encoders,
-        }
+        stats = self.vision.get_cumulative_stats()
+        return {**stats, "encoders": {"vision": stats}}
 
     @torch.inference_mode()
     def execute(self, mm_kwargs: dict[str, Any]) -> list[torch.Tensor]:
@@ -255,31 +166,5 @@ class HunyuanImage3EncoderCudaGraphManager:
             self.vision.graph_misses += len(vision_inputs["pixels"])
             vision = self.model._vit_encode(*vision_inputs.values())
 
-        vae_images = images["vae_pixel_values"]
-        groups = defaultdict(list)
-        for i, pixels in enumerate(vae_images):
-            groups[tuple(pixels.shape[-2:])].append(i)
-        posteriors = [None] * len(vae_images)
-        factor = self.vae.model.factor
-        for (height, width), indices in groups.items():
-            inputs = {"pixels": torch.stack([vae_images[i] for i in indices])}
-            if (height, width) in self.vae.model.resolutions:
-                outputs = self.vae.execute(inputs)
-            else:
-                self.vae.graph_misses += len(indices)
-                raw = self.vae.model.encoder_eager_forward(inputs)
-                outputs = raw.split(height * width // factor**2)
-            for i, output in zip(indices, outputs):
-                posteriors[i] = output.T.reshape(1, -1, 1, height // factor, width // factor)
-
-        # Sampling stays in request order, after all deterministic graph replays.
-        seed = images.get("vae_generator_seed")
-        generator = None
-        if seed is not None and seed.numel():
-            generator = torch.Generator(device=vae_images[0].device).manual_seed(int(seed.reshape(-1)[0].item()))
-        vae_tokens = []
-        for parameters in posteriors:
-            t, latents = self.model._sample_vae_latents(DiagonalGaussianDistribution(parameters), generator=generator)
-            tokens, _, _ = self.model.patch_embed(latents, self.model.time_embed(t[0]))
-            vae_tokens.append(tokens)
+        vae_tokens = self.model._encode_vae_tokens(images["vae_pixel_values"], images.get("vae_generator_seed"))
         return self.model._combine_image_embeddings(vision, vae_tokens)
